@@ -82,7 +82,8 @@ check_port() {
     local p=$1 why=$2 var=$3 owner
     owner=$(port_owner "$p")
     if [ -n "$owner" ]; then
-        if [ "$ours" = 1 ] && systemctl is-active -q "$SERVICE" && echo "$owner" | grep -q python; then
+        app_pid=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)
+        if [ "$ours" = 1 ] && [ "${app_pid:-0}" != 0 ] && echo "$owner" | grep -q "pid=$app_pid,"; then
             say "port $p: used by this app already (ok)"
         elif [ "$why" = nginx ] && echo "$owner" | grep -q nginx && [ -f "$SITE" ]; then
             say "port $p: nginx, from this app's site (ok)"
@@ -119,8 +120,8 @@ if [ -d "$APP_DIR/.git" ] && ! git -c safe.directory="$APP_DIR" -C "$APP_DIR" re
     fail "$APP_DIR holds a different git repo"
 fi
 # Site files from this script: current ones name epfo-search; the first
-# version only carried the "setup.sh replaces SERVER_NAME" comment.
-if [ -f "$SITE" ] && ! grep -qE "epfo-search|setup.sh replaces SERVER_NAME" "$SITE"; then
+# version only carried the "nginx in front of the app" comment.
+if [ -f "$SITE" ] && ! grep -qE "epfo-search|nginx in front of the app" "$SITE"; then
     fail "$SITE exists and is not this app"
 fi
 if id "$APP_USER" >/dev/null 2>&1; then say "user $APP_USER: exists (reused)"; else say "user $APP_USER: will be created"; fi
