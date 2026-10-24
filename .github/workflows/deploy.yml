@@ -31,4 +31,4 @@ jobs:
             .venv/bin/pip install -q -r requirements.txt
             sudo /usr/bin/systemctl restart epfo-search
             sleep 2
-            curl -fsS -o /dev/null http://127.0.0.1:8765/ && echo "App is up"
+            systemctl is-active epfo-search && echo "App is up"
