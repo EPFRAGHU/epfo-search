@@ -45,8 +45,25 @@ ssh root@<vps-ip>
 
 ```
 curl -fsSL https://raw.githubusercontent.com/<you>/epfo-search/main/deploy/setup.sh -o setup.sh
+bash setup.sh --check https://github.com/<you>/epfo-search.git <your-domain-or-vps-ip>
 bash setup.sh https://github.com/<you>/epfo-search.git <your-domain-or-vps-ip>
 ```
+
+`--check` only looks at the server and changes nothing. It stops if a port,
+user, folder or service name is already taken, or if a missing package would
+upgrade something other apps use. If it reports a port in use, pick another:
+`PUBLIC_PORT=8095 bash setup.sh ...`
+
+Safe on a VPS that already runs other apps:
+
+- never installs nginx and never upgrades packages; installs only `python3-venv`/`git` if missing
+- with an IP, the app gets its own port (default **8090**), so port 80/443 and
+  existing sites are not touched; with a domain, nginx answers on port 80
+  only for that exact name
+- adds just one nginx site file, never edits other sites or the default site;
+  removes its file again if `nginx -t` fails
+- everything it creates is named `epfo-search` / `epfo` (`/opt/epfo-search`,
+  service `epfo-search`, user `epfo`)
 
 **Private repository:** the VPS needs read access. On the VPS:
 
@@ -64,8 +81,18 @@ scp deploy/setup.sh root@<vps-ip>:setup.sh                             # run thi
 bash setup.sh git@github.com:<you>/epfo-search.git <your-domain-or-vps-ip>
 ```
 
-Open `http://<your-domain-or-vps-ip>`. The app runs under systemd, so it
-restarts on crash and after a reboot.
+The script prints the address to open, e.g. `http://<vps-ip>:8090`. If it
+doesn't load, allow that TCP port in Hostinger hPanel > VPS > Firewall. The
+app runs under systemd, so it restarts on crash and after a reboot.
+
+To remove it completely later (touches nothing else):
+
+```
+systemctl disable --now epfo-search
+rm -f /etc/systemd/system/epfo-search.service /etc/sudoers.d/epfo-search
+rm -f /etc/nginx/sites-enabled/epfo-search /etc/nginx/sites-available/epfo-search && nginx -t && systemctl reload nginx
+rm -rf /opt/epfo-search && userdel -r epfo
+```
 
 ### 3. HTTPS (needs a domain)
 
