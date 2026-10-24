@@ -31,6 +31,7 @@ MAP_FILES = {f"/map/{n}": os.path.join(os.path.dirname(os.path.abspath(__file__)
              for n in ("india_states.geojson", "india_outline.geojson")}
 SESSION_TTL = 30 * 60  # seconds a visitor's search stays usable while idle
 MAX_SESSIONS = 1000
+MAX_SEARCHES = 5  # recent searches kept per visitor (one per open tab, roughly)
 
 # One entry per browser, keyed by the "sid" cookie, so visitors don't see
 # or overwrite each other's captcha and results.
@@ -38,10 +39,10 @@ _sessions = {}
 _sessions_lock = threading.Lock()
 
 
-def row_fields(state, row):
+def row_fields(search, row):
     """(establishment id, name, address, office) of a result row, found by
     column name: Establishment ID | Establishment Name | Address | Office Name."""
-    cols = {h.lower(): i for i, h in enumerate(state["header"])}
+    cols = {h.lower(): i for i, h in enumerate(search["header"])}
     cells = row["cells"]
     return tuple(cells[i] if i < len(cells) else "" for i in
                  (cols.get(h, d) for h, d in (("establishment id", 0), ("establishment name", 1),
@@ -49,7 +50,9 @@ def row_fields(state, row):
 
 
 def new_state():
-    return {"client": None, "results": [], "results_client": None, "header": [], "seen": time.time()}
+    # client: EPFO session of the latest captcha; searches: search id ->
+    # {"results", "client", "header"}, oldest first
+    return {"client": None, "searches": {}, "seen": time.time()}
 
 
 def get_state(sid):
@@ -186,7 +189,7 @@ $('f').onsubmit = async ev => {
           + '<td><button class="link nowrap" onclick="showOnMap(' + i + ')" title="Show this establishment on the map">📍 Show on map</button></td></tr>';
       });
       $('out').innerHTML = h + '</table></div></div>';
-      lastResults = d.results; lastHeader = d.header; pinTried.clear();
+      lastResults = d.results; lastHeader = d.header; searchId = d.search; pinTried.clear();
       plotResults(d.results);
     }
   } catch (e) { $('msg').textContent = 'Request failed: ' + e; }
@@ -197,10 +200,14 @@ async function details(i){
   $('details').innerHTML = '<div class="card">Loading details…</div>';
   let d;
   try {
-    const r = await fetch('/details', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index:i})});
+    const r = await fetch('/details', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i, search: searchId})});
     d = await r.json();
   } catch (e) { d = {error: 'Request failed: ' + e}; }
-  if (d.error) { $('details').innerHTML = '<div class="card msg">' + esc(d.error) + '</div>'; return; }
+  if (d.error) {
+    $('details').innerHTML = '<div class="card msg">' + esc(d.error) + '</div>';
+    $('details').scrollIntoView({behavior: 'smooth', block: 'center'});
+    return;
+  }
   $('details').innerHTML = d.sections.map(s => {
     const pay = s.title === 'Payment Details' && s.rows.length > 1;
     if (pay) return paymentCard(s.rows);
@@ -421,7 +428,8 @@ async function makeView(){
 // The pincode in its EPFO details places it far better than the address
 // line, so when that is not known yet the server reads it first (once per
 // row) and the pins are redrawn.
-let lastPoints = [], lastResults = [], lastHeader = [];
+// searchId: the server's ID for the search these rows came from
+let lastPoints = [], lastResults = [], lastHeader = [], searchId = null;
 const pinTried = new Set();
 
 async function showOnMap(i){
@@ -434,7 +442,7 @@ async function showOnMap(i){
     pinTried.add(i);
     $('mapStatus').textContent = 'Reading the pincode from EPFO details…';
     let d; try {
-      const res = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i})});
+      const res = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i, search: searchId})});
       d = await res.json();
     } catch (e) { d = {}; }
     await plotResults(lastPlot);
@@ -454,7 +462,7 @@ async function plotResults(results){
   view.clear();
   let d;
   try {
-    const r = await fetch('/geocode', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
+    const r = await fetch('/geocode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({search: searchId})});
     d = await r.json();
   } catch (e) { d = {error: 'Request failed: ' + e}; }
   if (run !== plotRun) return;  // a newer search started
@@ -532,11 +540,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         except ValueError:
             return self._json({"error": "Bad request."}, 400)
-        c = state["client"]
-        if c is None:
-            return self._json({"error": "Load a captcha first."})
         try:
             if self.path == "/search":
+                c = state["client"]
+                if c is None:
+                    return self._json({"error": "Load a captcha first."})
                 q = body.get("q", "").strip()
                 is_code = q.isdigit()
                 if is_code and len(q) > 7:
@@ -546,31 +554,41 @@ class Handler(BaseHTTPRequestHandler):
                                            captcha=body.get("captcha", ""))
                 if isinstance(results, str):
                     return self._json({"error": results.replace("JSP Page", "").strip()[:500]})
-                # Details must use the session that ran the search, even after
-                # the page loads a new captcha (which starts a new session).
-                state["results"], state["results_client"] = results, c
                 if header and header[-1].lower() == "action":
                     header = header[:-1]
                     for r in results:
                         r["cells"] = r["cells"][:len(header)]
-                state["header"] = header
-                return self._json({"header": header, "results": [
+                # Each search gets an ID that the page sends back with every
+                # row click, so a row always refers to its own search even
+                # when another tab searched since. Details must use the EPFO
+                # session that ran the search (the page loads a new captcha,
+                # which starts a new one), so it is kept with the results.
+                search_id = secrets.token_hex(6)
+                searches = state["searches"]
+                searches[search_id] = {"results": results, "client": c, "header": header}
+                while len(searches) > MAX_SEARCHES:
+                    del searches[next(iter(searches))]
+                return self._json({"search": search_id, "header": header, "results": [
                     {"cells": r["cells"], "has_details": bool(r["est_id"])} for r in results]})
+            s = state["searches"].get(body.get("search"))
+            if s is None:
+                return self._json({"error": "This search has expired (the app was updated, or it was idle "
+                                            "for a while). Please search again.", "expired": True})
             if self.path == "/details":
-                r = state["results"][int(body["index"])]
-                sections = state["results_client"].details(r["est_id"], r["urls"])
+                r = s["results"][int(body["index"])]
+                sections = s["client"].details(r["est_id"], r["urls"])
                 # Keep the pincode and full address for the map, for everyone
                 pin, full = address_from_details(sections)
-                remember_address(row_fields(state, r)[0], pin, full)
+                remember_address(row_fields(s, r)[0], pin, full)
                 return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections], "pin": pin})
             if self.path == "/pincode":
                 # Pincode of one row without opening all its details: fetch
                 # its detail panels one at a time until one has the address.
-                r = state["results"][int(body["index"])]
-                est_id = row_fields(state, r)[0]
+                r = s["results"][int(body["index"])]
+                est_id = row_fields(s, r)[0]
                 known = known_address(est_id)
                 if not (known and known.get("pin")) and r.get("est_id") and r.get("urls"):
-                    c = state["results_client"]
+                    c = s["client"]
                     for url in r["urls"]:
                         if not url:
                             continue
@@ -585,8 +603,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/geocode":
                 # Every result at once
                 points = []
-                for r in state["results"]:
-                    est_id, name, address, office = row_fields(state, r)
+                for r in s["results"]:
+                    est_id, name, address, office = row_fields(s, r)
                     known = known_address(est_id) or {}
                     full = known.get("address") or ", ".join(x for x in (address, office) if x)
                     points.append({"point": geocode(address, office, est_id), "est_id": est_id,
