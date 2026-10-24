@@ -7,6 +7,11 @@ venv/
 geocode_cache.json
 geocode_cache.json.tmp
 last_search_response.html
+data/in_places.sqlite
+data/in_places.sqlite.tmp
+
+# GeoNames download used by tools/build_places.py
+build/
 
 # Local Claude Code settings
 .claude/settings.local.json

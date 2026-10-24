@@ -145,6 +145,10 @@ systemctl restart epfo-search       # restart
 - Each visitor gets their own EPFO session (cookie), so several people can search at once.
 - The EPFO portal may refuse requests from some data-centre IPs. If searches
   fail only on the VPS, check `journalctl` and `last_search_response.html` in `/opt/epfo-search`.
-- Nominatim's free service allows one lookup per second and no heavy use.
-  Results are cached in `geocode_cache.json`, which is fine for light use;
-  for many users switch to a paid geocoder or your own Nominatim.
+- Map pins come from a local list of Indian places (`data/in_places.tsv.gz`,
+  from [GeoNames](https://www.geonames.org), CC BY 4.0), so a whole result
+  list is placed in milliseconds. Pins are at the town/locality named in the
+  address, or at the EPFO office city; "Open in Google Maps" in each pin
+  searches the full address. Rebuild the list with `tools/build_places.py`.
+- Only office cities missing from that list are looked up online (OpenStreetMap
+  Nominatim, one request per second, cached in `geocode_cache.json`).

@@ -162,13 +162,14 @@ async function details(i){
   }).join('');
   $('details').scrollIntoView({behavior:'smooth'});
 }
-// Map: pins are placed one by one because the free geocoder allows one
-// lookup per second (repeat searches come from the local cache, so instant).
+// Map: the server places every result in one request from its local list
+// of Indian places, so all pins appear together.
 let map, pins, plotRun = 0;
-const PRECISION = {address: 'Address match', locality: 'Approximate: town/locality from address', office: 'Approximate: EPFO office city', state: 'Rough: state only'};
+const PRECISION = {locality: 'Town/locality from the address', office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
   $('mapCard').hidden = false;
+  $('mapStatus').textContent = 'Placing ' + results.length + ' on the map…';
   if (!map) {
     map = L.map('map').setView([22.5, 79], 5);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -177,29 +178,30 @@ async function plotResults(results){
   }
   pins.clearLayers();
   map.invalidateSize();
-  let placed = 0, approx = 0, missed = 0;
-  for (let i = 0; i < results.length; i++) {
-    $('mapStatus').textContent = 'Locating ' + (i + 1) + ' of ' + results.length + '…';
-    let g;
-    try {
-      const r = await fetch('/geocode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index:i})});
-      g = await r.json();
-    } catch (e) { g = {error: String(e)}; }
-    if (run !== plotRun) return;  // a newer search started
-    if (!g.point) { missed++; continue; }
+  let d;
+  try {
+    const r = await fetch('/geocode', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
+    d = await r.json();
+  } catch (e) { d = {error: 'Request failed: ' + e}; }
+  if (run !== plotRun) return;  // a newer search started
+  if (d.error) { $('mapStatus').textContent = d.error; return; }
+  let town = 0, approx = 0, missed = 0;
+  d.points.forEach((g, i) => {
     const p = g.point, x = results[i];
-    const exact = p.precision === 'address';
-    exact ? placed++ : approx++;
+    if (!p) { missed++; return; }
+    const good = p.precision === 'locality';
+    good ? town++ : approx++;
     const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
-    L.circleMarker([p.lat, p.lng], {radius: 8, weight: 2, color: exact ? '#1f5fbf' : '#c2410c', fillOpacity: .55})
+    L.circleMarker([p.lat, p.lng], {radius: 8, weight: 2, color: good ? '#1f5fbf' : '#c2410c', fillOpacity: .55})
       .bindPopup('<b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
         + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
-        + (x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : ''))
+        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : ''))
       .addTo(pins);
-    map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30], animate: false});
-  }
-  $('mapStatus').textContent = placed + ' at address (blue), ' + approx + ' approximate (orange)'
-    + (missed ? ', ' + missed + ' not found' : '') + '. Map data © OpenStreetMap.';
+  });
+  if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]});
+  $('mapStatus').textContent = town + ' at town/locality (blue), ' + approx + ' at EPFO office city (orange)'
+    + (missed ? ', ' + missed + ' not found' : '') + '. For the exact spot use "Open in Google Maps". '
+    + 'Places © GeoNames, map © OpenStreetMap.';
 }
 newCaptcha();
 </script>
@@ -280,16 +282,18 @@ class Handler(BaseHTTPRequestHandler):
                 sections = state["results_client"].details(r["est_id"], r["urls"])
                 return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections]})
             if self.path == "/geocode":
-                # Columns: Establishment ID | Establishment Name | Address | Office Name
+                # Every result at once. Columns: Establishment ID | Establishment Name | Address | Office Name
                 cols = {h.lower(): i for i, h in enumerate(state["header"])}
-                cells = state["results"][int(body["index"])]["cells"]
-                est_id, name, address, office = (
-                    cells[i] if i < len(cells) else ""
-                    for i in (cols.get(h, d) for h, d in (("establishment id", 0), ("establishment name", 1),
-                                                          ("address", 2), ("office name", 3))))
-                return self._json({"point": geocode(address, office, est_id), "est_id": est_id,
+                idx = [cols.get(h, d) for h, d in (("establishment id", 0), ("establishment name", 1),
+                                                    ("address", 2), ("office name", 3))]
+                points = []
+                for r in state["results"]:
+                    cells = r["cells"]
+                    est_id, name, address, office = (cells[i] if i < len(cells) else "" for i in idx)
+                    points.append({"point": geocode(address, office, est_id), "est_id": est_id,
                                    "name": name, "address": address,
                                    "query": ", ".join(x for x in (name, address, office) if x)})
+                return self._json({"points": points})
         except (requests.RequestException, IndexError, KeyError, ValueError) as e:
             return self._json({"error": f"Failed: {e}"})
         self._json({"error": "unknown path"}, 404)

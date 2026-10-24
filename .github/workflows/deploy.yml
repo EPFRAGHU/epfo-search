@@ -29,6 +29,7 @@ jobs:
             cd /opt/epfo-search
             git pull --ff-only
             .venv/bin/pip install -q -r requirements.txt
+            .venv/bin/python -c "import epfo_geocode; epfo_geocode._places('PUNE')"
             sudo /usr/bin/systemctl restart epfo-search
             sleep 2
             systemctl is-active epfo-search && echo "App is up"
