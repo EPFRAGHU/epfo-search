@@ -72,7 +72,7 @@ fi
 
 # Ports
 check_port() {
-    local p=$1 why=$2 owner
+    local p=$1 why=$2 var=$3 owner
     owner=$(port_owner "$p")
     if [ -n "$owner" ]; then
         if [ "$ours" = 1 ] && systemctl is-active -q "$SERVICE" && echo "$owner" | grep -q python; then
@@ -80,15 +80,15 @@ check_port() {
         elif [ "$why" = nginx ] && echo "$owner" | grep -q nginx && [ -f "$SITE" ]; then
             say "port $p: nginx, from this app's site (ok)"
         else
-            fail "port $p is already used: $owner  -> pick another, e.g. PUBLIC_PORT=8091 / APP_PORT=8766"
+            fail "port $p is already used by: $(echo "$owner" | grep -o 'users:.*')  -> run with $var=<a free port>"
         fi
     else
         say "port $p: free"
     fi
 }
 if [ "$has_nginx" = 1 ]; then
-    check_port "$APP_PORT" app
-    if [ "$is_ip" = 1 ]; then check_port "$PUBLIC_PORT" nginx; fi
+    check_port "$APP_PORT" app APP_PORT
+    if [ "$is_ip" = 1 ]; then check_port "$PUBLIC_PORT" nginx PUBLIC_PORT; fi
     owner80=$(port_owner 80)
     if [ "$is_ip" = 0 ] && [ -n "$owner80" ] && ! echo "$owner80" | grep -q nginx; then
         fail "port 80 belongs to something other than nginx: $owner80  -> use the IP instead of a domain"
@@ -98,12 +98,15 @@ if [ "$has_nginx" = 1 ]; then
         fail "another nginx site already uses the name $SERVER_NAME"
     fi
 else
-    check_port "$PUBLIC_PORT" app
+    check_port "$PUBLIC_PORT" app PUBLIC_PORT
 fi
 
 # Names this app uses
 if [ -f "$UNIT" ] && [ "$ours" = 0 ]; then fail "a different service called $SERVICE already exists"; fi
-if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then fail "$APP_DIR exists and is not this app"; fi
+# An empty folder is left over from an interrupted earlier run; reuse it.
+if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+    fail "$APP_DIR exists and is not this app"
+fi
 if [ -d "$APP_DIR/.git" ] && ! git -C "$APP_DIR" remote get-url origin 2>/dev/null | grep -q "epfo-search"; then
     fail "$APP_DIR holds a different git repo"
 fi
