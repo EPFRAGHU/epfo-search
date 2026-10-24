@@ -8,6 +8,7 @@ online service. On first use the list is turned into a small SQLite index
 EPFO addresses are often incomplete (no pincode, lines glued together such
 as 'M.G.ROADERNAKULAM'), so each lookup tries, in order:
   0. an exact location someone saved for this establishment -> "saved"
+     the pincode from its EPFO details (once anyone opened them) -> "pincode"
   1. a town or locality named in the address, near the EPFO office
                                                   -> precision "locality"
   2. the EPFO office city                         -> precision "office"
@@ -213,21 +214,45 @@ def _locality(address, near):
     return None
 
 
-# ---- exact locations saved by people -----------------------------------
+# ---- per-establishment facts kept on disk ----------------------------------
 
-_saved_lock = threading.Lock()
-_saved = None
+class _Store:
+    """Small JSON file of est_id -> dict, safe for the server's threads."""
+
+    def __init__(self, path):
+        self.path, self.lock, self.data = path, threading.Lock(), None
+
+    def _load(self):
+        if self.data is None:
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    self.data = json.load(f)
+            except (OSError, ValueError):
+                self.data = {}
+        return self.data
+
+    def get(self, key):
+        with self.lock:
+            return self._load().get(key) if key else None
+
+    def put(self, key, value):
+        """value None removes the key."""
+        with self.lock:
+            data = self._load()
+            if value is None:
+                data.pop(key, None)
+            else:
+                data[key] = value
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=0, ensure_ascii=False)
+            os.replace(tmp, self.path)
 
 
-def _load_saved():
-    global _saved
-    if _saved is None:
-        try:
-            with open(SAVED_PATH, encoding="utf-8") as f:
-                _saved = json.load(f)
-        except (OSError, ValueError):
-            _saved = {}
-    return _saved
+# Exact spots people set; pincode + full address read from EPFO details
+_saved = _Store(SAVED_PATH)
+_addresses = _Store(os.path.join(DATA_DIR, "est_addresses.json"))
 
 
 def save_location(est_id, lat, lng):
@@ -237,25 +262,80 @@ def save_location(est_id, lat, lng):
         lat, lng = float(lat), float(lng)
         if not (INDIA_BOX[0] <= lat <= INDIA_BOX[1] and INDIA_BOX[2] <= lng <= INDIA_BOX[3]):
             raise ValueError("That point is not in India.")
-    with _saved_lock:
-        saved = _load_saved()
-        if lat is None:
-            saved.pop(est_id, None)
-        else:
-            saved[est_id] = {"lat": round(lat, 6), "lng": round(lng, 6), "at": int(time.time())}
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = SAVED_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(saved, f, indent=0)
-        os.replace(tmp, SAVED_PATH)
+        _saved.put(est_id, {"lat": round(lat, 6), "lng": round(lng, 6), "at": int(time.time())})
+    else:
+        _saved.put(est_id, None)
+
+
+# ---- pincodes -------------------------------------------------------------
+
+PINCODES_GZ = os.path.join(HERE, "data", "in_pincodes.tsv.gz")
+_pincodes = None
+PIN_RE = re.compile(r"(?<!\d)([1-9]\d{2})\s?(\d{3})(?!\d)")
+
+
+def pincode_point(pin):
+    """(lat, lng, place, district) of an Indian pincode, or None."""
+    global _pincodes
+    if _pincodes is None:
+        _pincodes = {}
+        if os.path.exists(PINCODES_GZ):
+            with gzip.open(PINCODES_GZ, "rt", encoding="utf-8") as f:
+                for line in f:
+                    c = line.rstrip("\n").split("\t")
+                    _pincodes[c[0]] = (float(c[1]), float(c[2]), c[3], c[4])
+    return _pincodes.get(pin)
+
+
+def address_from_details(sections):
+    """Pincode and full address from EPFO 'View details' panels.
+
+    Panels come as rows of cells, either label/value pairs
+    (["Pin Code", "682011"]) or a header row with values below it.
+    Only cells labelled pin/address/postal are read, so other six-digit
+    numbers (codes, counts) are not mistaken for a pincode."""
+    pin, address = None, ""
+
+    def take(label, value):
+        nonlocal pin, address
+        label = label.lower()
+        if "address" in label and value and len(value) > len(address):
+            address = value
+        if any(w in label for w in ("pin", "postal", "address")) and not pin:
+            m = PIN_RE.search(value or "")
+            if m and pincode_point(m.group(1) + m.group(2)):
+                pin = m.group(1) + m.group(2)
+
+    for _title, rows in sections:
+        for r, row in enumerate(rows):
+            for k in range(0, len(row) - 1):          # label | value | label | value ...
+                take(row[k], row[k + 1])
+            nxt = rows[r + 1] if r + 1 < len(rows) else None
+            if nxt and len(nxt) == len(row):           # header row over a value row
+                for h, v in zip(row, nxt):
+                    take(h, v)
+    return pin, address
+
+
+def remember_address(est_id, pin, address):
+    if est_id and (pin or address):
+        _addresses.put(est_id, {"pin": pin, "address": address, "at": int(time.time())})
+
+
+def known_address(est_id):
+    """{"pin", "address"} read earlier from this establishment's details."""
+    return _addresses.get(est_id)
 
 
 def geocode(address, office, est_id=""):
     """Return {"lat", "lng", "precision"} or None if nothing matched."""
-    with _saved_lock:
-        s = _load_saved().get(est_id) if est_id else None
+    s = _saved.get(est_id)
     if s:
         return {"lat": s["lat"], "lng": s["lng"], "precision": "saved"}
+    known = _addresses.get(est_id)
+    p = pincode_point(known["pin"]) if known and known.get("pin") else None
+    if p:
+        return {"lat": p[0], "lng": p[1], "precision": "pincode", "pin": known["pin"]}
     address, office = _clean(address), _clean(office)
     near = _office_point(office) if office else None
     point = _locality(address, near) if address else None

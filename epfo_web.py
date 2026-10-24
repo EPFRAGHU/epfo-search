@@ -20,8 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import geocode, save_location
-from epfo_lookup import EpfoClient
+from epfo_geocode import address_from_details, geocode, known_address, remember_address, save_location
+from epfo_lookup import BASE, EpfoClient, parse_tables
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
 GMAPS_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
@@ -208,7 +208,7 @@ $('f').onsubmit = async ev => {
           + '<td><button class="link nowrap" onclick="showGoogle(' + i + ')" title="Show this establishment on Google map">📍 Google map</button></td></tr>';
       });
       $('out').innerHTML = h + '</table></div></div>';
-      lastResults = d.results; lastHeader = d.header;
+      lastResults = d.results; lastHeader = d.header; pinTried.clear();
       plotResults(d.results);
     }
   } catch (e) { $('msg').textContent = 'Request failed: ' + e; }
@@ -228,7 +228,12 @@ async function details(i){
     if (pay) return paymentCard(s.rows);
     return '<div class="card"><h2>' + esc(s.title) + '</h2>' + table(s.rows) + '</div>';
   }).join('');
-  if (lastPoints[i]) showGoogle(i);  // Google map of this establishment, above the details
+  // Google map of this establishment, above the details; the details just
+  // gave its pincode, so redraw the pins first when that is new
+  pinTried.add(i);
+  const p = lastPoints[i] && lastPoints[i].point;
+  if (d.pin && p && !['saved', 'pincode'].includes(p.precision)) await plotResults(lastPlot);
+  if (lastPoints[i]) showGoogle(i);
   $('details').scrollIntoView({behavior:'smooth'});
 }
 
@@ -454,13 +459,35 @@ function placeOf(i){
 // "Search name" lets Google try the name and address instead; "Set exact
 // location" saves the real spot for everyone.
 let gmMode = 'pin', gmSat = false;
-const ZOOM = {saved: 17, locality: 15, office: 13, state: 7};
+const ZOOM = {saved: 17, pincode: 14, locality: 15, office: 13, state: 7};
+const pinTried = new Set();
+
+// The pincode in an establishment's EPFO details places it far better than
+// the address line. If it is not known yet, ask the server to read it from
+// the details panels (once per row), then redraw the pins.
+async function lookupPincode(i){
+  pinTried.add(i);
+  $('gmInfo').textContent = 'Reading the pincode from EPFO details…';
+  let d; try {
+    const r = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i})});
+    d = await r.json();
+  } catch (e) { d = {}; }
+  if (d.pin) { await plotResults(lastPlot); }
+  showGoogle(i, false);
+}
 
 function showGoogle(i, scroll = true){
   const g = placeOf(i); if (!g) return;
   if (i !== gmIndex) { gmMode = 'pin'; $('gmSet').hidden = true; }
   gmIndex = i;
   const p = lastPoints[i] && lastPoints[i].point;
+  const r = lastResults[i];
+  if (p && !['saved', 'pincode'].includes(p.precision) && r && r.has_details && !pinTried.has(i)) {
+    $('mapCard').hidden = false; $('gmapBox').hidden = false;
+    if (scroll) $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'center'});
+    lookupPincode(i);
+    return;
+  }
   const mode = p ? gmMode : 'name';
   document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
   if ($('row' + i)) $('row' + i).classList.add('sel');
@@ -474,7 +501,8 @@ function showGoogle(i, scroll = true){
     + (mode === 'pin' ? ZOOM[p.precision] || 15 : 15) + (gmSat ? '&t=k' : '') + '&output=embed';
   const open = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
   $('gmInfo').innerHTML = (mode === 'pin'
-      ? 'Pin at <b>' + p.lat.toFixed(5) + ', ' + p.lng.toFixed(5) + '</b> · ' + esc(PRECISION[p.precision])
+      ? 'Pin at <b>' + p.lat.toFixed(5) + ', ' + p.lng.toFixed(5) + '</b> · '
+        + (p.precision === 'pincode' ? 'Pincode <b>' + esc(p.pin) + '</b> area, from EPFO details' : esc(PRECISION[p.precision]))
         + (p.precision === 'saved' ? '' : '. Not exact? Use "Search name", or set the exact location.')
       : 'Google search for: <b>' + esc(g.query) + '</b>' + (p ? '' : ' (no coordinates for this establishment)'))
     + '<br><a href="#" onclick="openSetLocation();return false">Set exact location</a>'
@@ -529,7 +557,8 @@ async function clearLocation(){
   afterLocationChange(i);
 }
 
-const PRECISION = {saved: 'Exact location (saved)', locality: 'Approximate: town/locality from the address',
+const PRECISION = {saved: 'Exact location (saved)', pincode: 'Pincode area, from EPFO details',
+                   locality: 'Approximate: town/locality from the address',
                    office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
@@ -545,8 +574,8 @@ async function plotResults(results){
   } catch (e) { d = {error: 'Request failed: ' + e}; }
   if (run !== plotRun) return;  // a newer search started
   if (d.error) { $('mapStatus').textContent = d.error; return; }
-  const n = {saved: 0, locality: 0, approx: 0, missed: 0};
-  const COLOR = {saved: '#15803d', locality: '#1f5fbf'};
+  const n = {saved: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
+  const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
   lastPoints = d.points;
   $('gmapBox').hidden = true; $('gmapFrame').removeAttribute('src');
   d.points.forEach((g, i) => {
@@ -560,7 +589,8 @@ async function plotResults(results){
         + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i);
   });
   view.fit();
-  $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '') + n.locality + ' at town/locality (blue), '
+  $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '')
+    + (n.pincode ? n.pincode + ' by pincode (teal), ' : '') + n.locality + ' at town/locality (blue), '
     + n.approx + ' at EPFO office city (orange)' + (n.missed ? ', ' + n.missed + ' not found' : '')
     + '. Click "📍 Google map" in a row for the Google map; set the exact location there once and everyone sees it.';
   if (d.points.length === 1 && d.points[0].point) showGoogle(0);
@@ -645,15 +675,39 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/details":
                 r = state["results"][int(body["index"])]
                 sections = state["results_client"].details(r["est_id"], r["urls"])
-                return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections]})
+                # Keep the pincode and full address for the map, for everyone
+                pin, full = address_from_details(sections)
+                remember_address(row_fields(state, r)[0], pin, full)
+                return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections], "pin": pin})
+            if self.path == "/pincode":
+                # Pincode of one row without opening all its details: fetch
+                # its detail panels one at a time until one has the address.
+                r = state["results"][int(body["index"])]
+                est_id = row_fields(state, r)[0]
+                known = known_address(est_id)
+                if not (known and known.get("pin")) and r.get("est_id") and r.get("urls"):
+                    c = state["results_client"]
+                    for url in r["urls"]:
+                        if not url:
+                            continue
+                        resp = c._post(BASE + url, {"EstId": r["est_id"]})
+                        resp.raise_for_status()
+                        pin, full = address_from_details([("", parse_tables(resp.text))])
+                        if pin:
+                            remember_address(est_id, pin, full)
+                            break
+                    known = known_address(est_id)
+                return self._json({"pin": (known or {}).get("pin"), "address": (known or {}).get("address", "")})
             if self.path == "/geocode":
                 # Every result at once
                 points = []
                 for r in state["results"]:
                     est_id, name, address, office = row_fields(state, r)
+                    known = known_address(est_id) or {}
+                    full = known.get("address") or ", ".join(x for x in (address, office) if x)
                     points.append({"point": geocode(address, office, est_id), "est_id": est_id,
-                                   "name": name, "address": address,
-                                   "query": ", ".join(x for x in (name, address, office) if x)})
+                                   "name": name, "address": address, "pin": known.get("pin"),
+                                   "query": ", ".join(x for x in (name, full) if x)})
                 return self._json({"points": points})
             if self.path == "/location":
                 # Save (or clear, lat=None) the exact spot of one result row,
