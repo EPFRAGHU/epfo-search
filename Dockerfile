@@ -5,7 +5,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     EPFO_HOST=0.0.0.0 \
-    EPFO_PORT=8765
+    EPFO_PORT=8765 \
+    EPFO_DATA_DIR=/data
 
 WORKDIR /app
 COPY requirements.txt .
@@ -17,7 +18,10 @@ COPY . .
 # then run as an unprivileged user that can still write the geocode cache.
 RUN python -c "import epfo_geocode; epfo_geocode._places('PUNE')" \
     && useradd --system epfo \
-    && chown -R epfo /app
+    && mkdir -p /data && chown -R epfo /app /data
+# Saved exact locations live in /data: mount a persistent volume there
+# (Coolify: Persistent Storage, destination /data) so redeploys keep them.
+VOLUME /data
 USER epfo
 
 EXPOSE 8765

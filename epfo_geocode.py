@@ -7,6 +7,7 @@ online service. On first use the list is turned into a small SQLite index
 
 EPFO addresses are often incomplete (no pincode, lines glued together such
 as 'M.G.ROADERNAKULAM'), so each lookup tries, in order:
+  0. an exact location someone saved for this establishment -> "saved"
   1. a town or locality named in the address, near the EPFO office
                                                   -> precision "locality"
   2. the EPFO office city                         -> precision "office"
@@ -31,6 +32,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLACES_GZ = os.path.join(HERE, "data", "in_places.tsv.gz")
 PLACES_DB = os.path.join(HERE, "data", "in_places.sqlite")
 CACHE_PATH = os.path.join(HERE, "geocode_cache.json")
+# Exact locations people set for establishments. EPFO_DATA_DIR should be a
+# persistent folder (a Docker volume), so they survive redeploys.
+DATA_DIR = os.environ.get("EPFO_DATA_DIR") or HERE
+SAVED_PATH = os.path.join(DATA_DIR, "saved_locations.json")
+INDIA_BOX = (6.0, 38.0, 68.0, 98.0)  # lat min/max, lng min/max: saved points must be inside
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "epfo-search-local/1.0 (personal EPFO establishment map)"
 MIN_INTERVAL = 1.1  # seconds between Nominatim requests
@@ -207,8 +213,49 @@ def _locality(address, near):
     return None
 
 
+# ---- exact locations saved by people -----------------------------------
+
+_saved_lock = threading.Lock()
+_saved = None
+
+
+def _load_saved():
+    global _saved
+    if _saved is None:
+        try:
+            with open(SAVED_PATH, encoding="utf-8") as f:
+                _saved = json.load(f)
+        except (OSError, ValueError):
+            _saved = {}
+    return _saved
+
+
+def save_location(est_id, lat, lng):
+    """Remember the exact spot of an establishment; None clears it.
+    Raises ValueError for points outside India."""
+    if lat is not None:
+        lat, lng = float(lat), float(lng)
+        if not (INDIA_BOX[0] <= lat <= INDIA_BOX[1] and INDIA_BOX[2] <= lng <= INDIA_BOX[3]):
+            raise ValueError("That point is not in India.")
+    with _saved_lock:
+        saved = _load_saved()
+        if lat is None:
+            saved.pop(est_id, None)
+        else:
+            saved[est_id] = {"lat": round(lat, 6), "lng": round(lng, 6), "at": int(time.time())}
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = SAVED_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(saved, f, indent=0)
+        os.replace(tmp, SAVED_PATH)
+
+
 def geocode(address, office, est_id=""):
     """Return {"lat", "lng", "precision"} or None if nothing matched."""
+    with _saved_lock:
+        s = _load_saved().get(est_id) if est_id else None
+    if s:
+        return {"lat": s["lat"], "lng": s["lng"], "precision": "saved"}
     address, office = _clean(address), _clean(office)
     near = _office_point(office) if office else None
     point = _locality(address, near) if address else None

@@ -28,6 +28,9 @@ stop and start it again.
 3. **Build Pack:** `Dockerfile`. **Ports Exposes:** `8765`.
 4. **Domains:** `https://epfo.epf-dashboard.online` (your subdomain). Save, then **Deploy**.
 
+5. **Persistent Storage** > Add > Volume, destination path `/data`. Exact
+   locations people save are kept there; without it they are lost on redeploy.
+
 Coolify's proxy adds the route and a Let's Encrypt certificate, and other
 apps are not touched. Enable auto-deploy in the app's settings to redeploy
 on every push to `main`.

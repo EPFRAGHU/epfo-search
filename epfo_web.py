@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import geocode
+from epfo_geocode import geocode, save_location
 from epfo_lookup import EpfoClient
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
@@ -36,6 +36,16 @@ MAX_SESSIONS = 1000
 # or overwrite each other's captcha and results.
 _sessions = {}
 _sessions_lock = threading.Lock()
+
+
+def row_fields(state, row):
+    """(establishment id, name, address, office) of a result row, found by
+    column name: Establishment ID | Establishment Name | Address | Office Name."""
+    cols = {h.lower(): i for i, h in enumerate(state["header"])}
+    cells = row["cells"]
+    return tuple(cells[i] if i < len(cells) else "" for i in
+                 (cols.get(h, d) for h, d in (("establishment id", 0), ("establishment name", 1),
+                                               ("address", 2), ("office name", 3))))
 
 
 def new_state():
@@ -96,6 +106,12 @@ PAGE = r"""<!doctype html>
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
   #gmapBox { margin-top:14px; }
+  .gm-info { font-size:13px; color:var(--muted); margin:0 0 8px; }
+  .gm-info b { color:var(--text); font-weight:600; }
+  .gm-set { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; margin:0 0 10px; display:block; max-width:none; }
+  .gm-set[hidden] { display:none; }
+  .gm-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
+  .gm-row input { flex:1 1 280px; }
   tr.sel td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
   .nowrap { white-space:nowrap; }
   .gm-head { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; justify-content:space-between; margin-bottom:8px; }
@@ -144,7 +160,14 @@ PAGE = r"""<!doctype html>
     <div id="map"></div>
     <div id="gmapBox" hidden>
       <div class="gm-head"><b id="gmapTitle"></b>
-        <span class="tabs"><button id="gmRoad" class="on" type="button">Map</button><button id="gmSat" type="button">Satellite</button></span></div>
+        <span class="tabs"><button id="gmPin" class="on" type="button" title="Red pin at the establishment's coordinates">Pin</button><button id="gmName" type="button" title="Let Google search the name and address">Search name</button><button id="gmSat" type="button">Satellite</button></span></div>
+      <div class="gm-info" id="gmInfo"></div>
+      <form class="gm-set" id="gmSet" hidden>
+        <label for="gmCoords">Exact location: in Google Maps right-click the building and click the coordinates (copies them), or copy the page link, then paste here</label>
+        <div class="gm-row"><input id="gmCoords" autocomplete="off" placeholder="e.g. 9.93812, 76.26213  or  https://www.google.com/maps/place/...">
+          <button type="submit">Save location</button><button type="button" class="link" id="gmCancel">Cancel</button></div>
+        <div id="gmMsg" class="msg"></div>
+      </form>
       <iframe id="gmapFrame" title="Google map" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
     </div>
   </div>
@@ -353,9 +376,9 @@ async function googleView(){
   let markers = [], byIndex = {};
   return {
     clear(){ markers.forEach(m => m.setMap(null)); markers = []; byIndex = {}; info.close(); },
-    add(lat, lng, good, html, i){
+    add(lat, lng, color, html, i){
       const m = new g.Marker({position: {lat, lng}, map, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
-        fillColor: good ? '#1f5fbf' : '#c2410c', fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
+        fillColor: color, fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
       m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); });
       markers.push(m); byIndex[i] = [m, html];
     },
@@ -392,8 +415,8 @@ async function indiaView(){
   let byIndex = {};
   return {
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
-    add(lat, lng, good, html, i){
-      byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color: good ? '#1f5fbf' : '#c2410c', fillOpacity: .55})
+    add(lat, lng, color, html, i){
+      byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color, fillOpacity: .55})
         .bindPopup(html).addTo(pins);
     },
     focus(i){
@@ -426,24 +449,88 @@ function placeOf(i){
   return {name, query: [name, col('address', 2), col('office', 3)].filter(Boolean).join(', ')};
 }
 
-function showGoogle(i, sat){
+// Google's text search rarely finds EPFO addresses (no pincode, glued
+// words), so by default the Google map gets a red pin at the coordinates.
+// "Search name" lets Google try the name and address instead; "Set exact
+// location" saves the real spot for everyone.
+let gmMode = 'pin', gmSat = false;
+const ZOOM = {saved: 17, locality: 15, office: 13, state: 7};
+
+function showGoogle(i, scroll = true){
   const g = placeOf(i); if (!g) return;
+  if (i !== gmIndex) { gmMode = 'pin'; $('gmSet').hidden = true; }
   gmIndex = i;
+  const p = lastPoints[i] && lastPoints[i].point;
+  const mode = p ? gmMode : 'name';
   document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
   if ($('row' + i)) $('row' + i).classList.add('sel');
   $('mapCard').hidden = false;
   $('gmapBox').hidden = false;
   $('gmapTitle').textContent = 'Google map: ' + g.name;
-  $('gmRoad').classList.toggle('on', !sat); $('gmSat').classList.toggle('on', !!sat);
-  $('gmapFrame').src = 'https://maps.google.com/maps?q=' + encodeURIComponent(g.query)
-    + '&hl=en&gl=IN&z=15' + (sat ? '&t=k' : '') + '&output=embed';
+  $('gmPin').classList.toggle('on', mode === 'pin'); $('gmName').classList.toggle('on', mode === 'name');
+  $('gmSat').classList.toggle('on', gmSat);
+  const q = mode === 'pin' ? p.lat + ',' + p.lng : g.query;
+  $('gmapFrame').src = 'https://maps.google.com/maps?q=' + encodeURIComponent(q) + '&hl=en&gl=IN&z='
+    + (mode === 'pin' ? ZOOM[p.precision] || 15 : 15) + (gmSat ? '&t=k' : '') + '&output=embed';
+  const open = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
+  $('gmInfo').innerHTML = (mode === 'pin'
+      ? 'Pin at <b>' + p.lat.toFixed(5) + ', ' + p.lng.toFixed(5) + '</b> · ' + esc(PRECISION[p.precision])
+        + (p.precision === 'saved' ? '' : '. Not exact? Use "Search name", or set the exact location.')
+      : 'Google search for: <b>' + esc(g.query) + '</b>' + (p ? '' : ' (no coordinates for this establishment)'))
+    + '<br><a href="#" onclick="openSetLocation();return false">Set exact location</a>'
+    + (p && p.precision === 'saved' ? ' · <a href="#" onclick="clearLocation();return false">Remove saved location</a>' : '')
+    + ' · <a href="' + open + '" target="_blank" rel="noopener">Open in Google Maps</a>';
   if (view && view.focus) view.focus(i);  // and its pin on the overview map
-  $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'center'});
+  if (scroll) $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'center'});
 }
-$('gmRoad').onclick = () => showGoogle(gmIndex, false);
-$('gmSat').onclick = () => showGoogle(gmIndex, true);
+$('gmPin').onclick = () => { gmMode = 'pin'; showGoogle(gmIndex, false); };
+$('gmName').onclick = () => { gmMode = 'name'; showGoogle(gmIndex, false); };
+$('gmSat').onclick = () => { gmSat = !gmSat; showGoogle(gmIndex, false); };
 
-const PRECISION = {locality: 'Town/locality from the address', office: 'Approximate: EPFO office city', state: 'Rough: state only'};
+// "9.93812, 76.26213", or a Google Maps link: the place's own point (!3d..!4d..)
+// is exact; "@lat,lng" is only where the map was centred.
+function parseCoords(text){
+  let s = text.trim();
+  try { s = decodeURIComponent(s); } catch (e) {}
+  const m = s.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/)
+    || s.match(/[?&](?:q|query|ll|center|destination)=(-?\d+\.\d+),\s*(-?\d+\.\d+)/)
+    || s.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)
+    || s.match(/^\(?\s*(-?\d{1,2}\.\d+)\s*[,\s]\s*(-?\d{2,3}\.\d+)\s*\)?$/);
+  return m ? {lat: +m[1], lng: +m[2]} : null;
+}
+function openSetLocation(){
+  $('gmSet').hidden = false; $('gmMsg').textContent = ''; $('gmCoords').value = ''; $('gmCoords').focus();
+}
+$('gmCancel').onclick = () => { $('gmSet').hidden = true; };
+async function postLocation(body){
+  const r = await fetch('/location', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  return r.json();
+}
+async function afterLocationChange(i){
+  await plotResults(lastPlot);   // re-read all points, including saved ones
+  gmMode = 'pin'; showGoogle(i, false);
+}
+$('gmSet').onsubmit = async ev => {
+  ev.preventDefault();
+  const i = gmIndex, text = $('gmCoords').value;
+  if (/goo\.gl|maps\.app/.test(text)) { $('gmMsg').textContent = 'Short links cannot be read. In Google Maps right-click the building and click the coordinates at the top of the menu, then paste them here.'; return; }
+  const c = parseCoords(text);
+  if (!c) { $('gmMsg').textContent = 'No coordinates found. Paste them like 9.93812, 76.26213 or paste a full Google Maps link.'; return; }
+  let d; try { d = await postLocation({index: i, lat: c.lat, lng: c.lng}); } catch (e) { d = {error: String(e)}; }
+  if (d.error) { $('gmMsg').textContent = d.error; return; }
+  $('gmSet').hidden = true;
+  afterLocationChange(i);
+};
+async function clearLocation(){
+  const i = gmIndex;
+  let d; try { d = await postLocation({index: i, lat: null}); } catch (e) { d = {error: String(e)}; }
+  if (d.error) { alert(d.error); return; }
+  $('gmSet').hidden = true;
+  afterLocationChange(i);
+}
+
+const PRECISION = {saved: 'Exact location (saved)', locality: 'Approximate: town/locality from the address',
+                   office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
   lastPlot = results;
@@ -458,23 +545,24 @@ async function plotResults(results){
   } catch (e) { d = {error: 'Request failed: ' + e}; }
   if (run !== plotRun) return;  // a newer search started
   if (d.error) { $('mapStatus').textContent = d.error; return; }
-  let town = 0, approx = 0, missed = 0;
+  const n = {saved: 0, locality: 0, approx: 0, missed: 0};
+  const COLOR = {saved: '#15803d', locality: '#1f5fbf'};
   lastPoints = d.points;
   $('gmapBox').hidden = true; $('gmapFrame').removeAttribute('src');
   d.points.forEach((g, i) => {
     const p = g.point, x = results[i];
-    if (!p) { missed++; return; }
-    const good = p.precision === 'locality';
-    good ? town++ : approx++;
+    if (!p) { n.missed++; return; }
+    n[p.precision in COLOR ? p.precision : 'approx']++;
     const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
-    view.add(p.lat, p.lng, good, '<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
+    view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c','<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
         + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="#" onclick="showGoogle(' + i + ');return false"><b>Show on Google map</b></a>'
         + ' · <a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
         + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i);
   });
   view.fit();
-  $('mapStatus').textContent = town + ' at town/locality (blue), ' + approx + ' at EPFO office city (orange)'
-    + (missed ? ', ' + missed + ' not found' : '') + '. Click a pin, then "Show on Google map" for the exact address with roads and landmarks.';
+  $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '') + n.locality + ' at town/locality (blue), '
+    + n.approx + ' at EPFO office city (orange)' + (n.missed ? ', ' + n.missed + ' not found' : '')
+    + '. Click "📍 Google map" in a row for the Google map; set the exact location there once and everyone sees it.';
   if (d.points.length === 1 && d.points[0].point) showGoogle(0);
 }
 newCaptcha();
@@ -559,19 +647,28 @@ class Handler(BaseHTTPRequestHandler):
                 sections = state["results_client"].details(r["est_id"], r["urls"])
                 return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections]})
             if self.path == "/geocode":
-                # Every result at once. Columns: Establishment ID | Establishment Name | Address | Office Name
-                cols = {h.lower(): i for i, h in enumerate(state["header"])}
-                idx = [cols.get(h, d) for h, d in (("establishment id", 0), ("establishment name", 1),
-                                                    ("address", 2), ("office name", 3))]
+                # Every result at once
                 points = []
                 for r in state["results"]:
-                    cells = r["cells"]
-                    est_id, name, address, office = (cells[i] if i < len(cells) else "" for i in idx)
+                    est_id, name, address, office = row_fields(state, r)
                     points.append({"point": geocode(address, office, est_id), "est_id": est_id,
                                    "name": name, "address": address,
                                    "query": ", ".join(x for x in (name, address, office) if x)})
                 return self._json({"points": points})
-        except (requests.RequestException, IndexError, KeyError, ValueError) as e:
+            if self.path == "/location":
+                # Save (or clear, lat=None) the exact spot of one result row,
+                # for everyone. The establishment ID comes from this
+                # visitor's own search results, not from the request.
+                est_id = row_fields(state, state["results"][int(body["index"])])[0]
+                if not est_id:
+                    return self._json({"error": "This row has no establishment ID."})
+                lat = body.get("lat")
+                try:
+                    save_location(est_id, lat, body.get("lng") if lat is not None else None)
+                except OSError as e:
+                    return self._json({"error": f"Could not save on the server: {e.strerror}"})
+                return self._json({"ok": True})
+        except (requests.RequestException, IndexError, KeyError, ValueError, TypeError) as e:
             return self._json({"error": f"Failed: {e}"})
         self._json({"error": "unknown path"}, 404)
 

@@ -7,6 +7,8 @@ venv/
 geocode_cache.json
 geocode_cache.json.tmp
 last_search_response.html
+saved_locations.json
+saved_locations.json.tmp
 data/in_places.sqlite
 data/in_places.sqlite.tmp
 
