@@ -168,7 +168,7 @@ else
     sudo -u "$APP_USER" git clone "$REPO_URL" "$APP_DIR"
 fi
 sudo -u "$APP_USER" python3 -m venv "$APP_DIR/.venv"
-sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -q --timeout 60 --retries 5 -r "$APP_DIR/requirements.txt"
 
 if [ "$has_nginx" = 1 ]; then
     listen_host=127.0.0.1; listen_port=$APP_PORT
