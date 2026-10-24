@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import address_from_details, geocode, known_address, remember_address, save_location
+from epfo_geocode import address_from_details, geocode, known_address, remember_address
 from epfo_lookup import BASE, EpfoClient, parse_tables
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
@@ -105,18 +105,8 @@ PAGE = r"""<!doctype html>
   #map.far .st-label { display:none; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
-  #gmapBox { margin-top:14px; }
-  .gm-info { font-size:13px; color:var(--muted); margin:0 0 8px; }
-  .gm-info b { color:var(--text); font-weight:600; }
-  .gm-set { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; margin:0 0 10px; display:block; max-width:none; }
-  .gm-set[hidden] { display:none; }
-  .gm-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
-  .gm-row input { flex:1 1 280px; }
   tr.sel td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
   .nowrap { white-space:nowrap; }
-  .gm-head { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; justify-content:space-between; margin-bottom:8px; }
-  .gm-head .tabs { margin:0; }
-  #gmapFrame { width:100%; height:420px; border:1px solid var(--line); border-radius:8px; display:block; background:var(--bg); }
   /* Payment calendar: financial years as rows, March..February as columns */
   .cal { border-collapse:separate; border-spacing:4px; width:auto; min-width:100%; }
   .cal th, .cal td { border:0; padding:0; text-align:center; vertical-align:middle; background:none; }
@@ -158,18 +148,6 @@ PAGE = r"""<!doctype html>
     <h2>Map</h2>
     <p id="mapStatus"></p>
     <div id="map"></div>
-    <div id="gmapBox" hidden>
-      <div class="gm-head"><b id="gmapTitle"></b>
-        <span class="tabs"><button id="gmPin" class="on" type="button" title="Red pin at the establishment's coordinates">Pin</button><button id="gmName" type="button" title="Let Google search the name and address">Search name</button><button id="gmSat" type="button">Satellite</button></span></div>
-      <div class="gm-info" id="gmInfo"></div>
-      <form class="gm-set" id="gmSet" hidden>
-        <label for="gmCoords">Exact location: in Google Maps right-click the building and click the coordinates (copies them), or copy the page link, then paste here</label>
-        <div class="gm-row"><input id="gmCoords" autocomplete="off" placeholder="e.g. 9.93812, 76.26213  or  https://www.google.com/maps/place/...">
-          <button type="submit">Save location</button><button type="button" class="link" id="gmCancel">Cancel</button></div>
-        <div id="gmMsg" class="msg"></div>
-      </form>
-      <iframe id="gmapFrame" title="Google map" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
-    </div>
   </div>
   <div id="details"></div>
 <script>
@@ -205,7 +183,7 @@ $('f').onsubmit = async ev => {
       d.results.forEach((x, i) => {
         h += '<tr id="row' + i + '">' + x.cells.map(c => '<td>'+esc(c)+'</td>').join('')
           + '<td>' + (x.has_details ? '<button class="link" onclick="details(' + i + ')">View details</button>' : '') + '</td>'
-          + '<td><button class="link nowrap" onclick="showGoogle(' + i + ')" title="Show this establishment on Google map">📍 Google map</button></td></tr>';
+          + '<td><button class="link nowrap" onclick="showOnMap(' + i + ')" title="Show this establishment on the map">📍 Show on map</button></td></tr>';
       });
       $('out').innerHTML = h + '</table></div></div>';
       lastResults = d.results; lastHeader = d.header; pinTried.clear();
@@ -228,12 +206,11 @@ async function details(i){
     if (pay) return paymentCard(s.rows);
     return '<div class="card"><h2>' + esc(s.title) + '</h2>' + table(s.rows) + '</div>';
   }).join('');
-  // Google map of this establishment, above the details; the details just
-  // gave its pincode, so redraw the pins first when that is new
+  // The details just gave this establishment's pincode: redraw the pins
+  // when that moves its pin
   pinTried.add(i);
   const p = lastPoints[i] && lastPoints[i].point;
   if (d.pin && p && !['saved', 'pincode'].includes(p.precision)) await plotResults(lastPlot);
-  if (lastPoints[i]) showGoogle(i);
   $('details').scrollIntoView({behavior:'smooth'});
 }
 
@@ -440,121 +417,29 @@ async function makeView(){
   return indiaView();
 }
 
-// Google map of one establishment: Google's free embedded map (no key, no
-// billing) finds the address itself and shows roads, landmarks and satellite.
-let lastPoints = [], lastResults = [], lastHeader = [], gmIndex = -1;
-
-// Name and search text for row i: from the map lookup when it has run,
-// otherwise straight from the table (Name, Address, Office columns).
-function placeOf(i){
-  if (lastPoints[i]) return {name: lastPoints[i].name, query: lastPoints[i].query};
-  const r = lastResults[i]; if (!r) return null;
-  const col = (w, d) => { const k = lastHeader.findIndex(h => h.toLowerCase().includes(w)); return r.cells[k >= 0 ? k : d] || ''; };
-  const name = col('name', 1);
-  return {name, query: [name, col('address', 2), col('office', 3)].filter(Boolean).join(', ')};
-}
-
-// Google's text search rarely finds EPFO addresses (no pincode, glued
-// words), so by default the Google map gets a red pin at the coordinates.
-// "Search name" lets Google try the name and address instead; "Set exact
-// location" saves the real spot for everyone.
-let gmMode = 'pin', gmSat = false;
-const ZOOM = {saved: 17, pincode: 14, locality: 15, office: 13, state: 7};
+// Show one establishment on the map: zoom to its pin and open its popup.
+// The pincode in its EPFO details places it far better than the address
+// line, so when that is not known yet the server reads it first (once per
+// row) and the pins are redrawn.
+let lastPoints = [], lastResults = [], lastHeader = [];
 const pinTried = new Set();
 
-// The pincode in an establishment's EPFO details places it far better than
-// the address line. If it is not known yet, ask the server to read it from
-// the details panels (once per row), then redraw the pins.
-async function lookupPincode(i){
-  pinTried.add(i);
-  $('gmInfo').textContent = 'Reading the pincode from EPFO details…';
-  let d; try {
-    const r = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i})});
-    d = await r.json();
-  } catch (e) { d = {}; }
-  if (d.pin) { await plotResults(lastPlot); }
-  showGoogle(i, false);
-}
-
-function showGoogle(i, scroll = true){
-  const g = placeOf(i); if (!g) return;
-  if (i !== gmIndex) { gmMode = 'pin'; $('gmSet').hidden = true; }
-  gmIndex = i;
-  const p = lastPoints[i] && lastPoints[i].point;
-  const r = lastResults[i];
-  if (p && !['saved', 'pincode'].includes(p.precision) && r && r.has_details && !pinTried.has(i)) {
-    $('mapCard').hidden = false; $('gmapBox').hidden = false;
-    if (scroll) $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'center'});
-    lookupPincode(i);
-    return;
-  }
-  const mode = p ? gmMode : 'name';
+async function showOnMap(i){
   document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
   if ($('row' + i)) $('row' + i).classList.add('sel');
   $('mapCard').hidden = false;
-  $('gmapBox').hidden = false;
-  $('gmapTitle').textContent = 'Google map: ' + g.name;
-  $('gmPin').classList.toggle('on', mode === 'pin'); $('gmName').classList.toggle('on', mode === 'name');
-  $('gmSat').classList.toggle('on', gmSat);
-  const q = mode === 'pin' ? p.lat + ',' + p.lng : g.query;
-  $('gmapFrame').src = 'https://maps.google.com/maps?q=' + encodeURIComponent(q) + '&hl=en&gl=IN&z='
-    + (mode === 'pin' ? ZOOM[p.precision] || 15 : 15) + (gmSat ? '&t=k' : '') + '&output=embed';
-  const open = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
-  $('gmInfo').innerHTML = (mode === 'pin'
-      ? 'Pin at <b>' + p.lat.toFixed(5) + ', ' + p.lng.toFixed(5) + '</b> · '
-        + (p.precision === 'pincode' ? 'Pincode <b>' + esc(p.pin) + '</b> area, from EPFO details' : esc(PRECISION[p.precision]))
-        + (p.precision === 'saved' ? '' : '. Not exact? Use "Search name", or set the exact location.')
-      : 'Google search for: <b>' + esc(g.query) + '</b>' + (p ? '' : ' (no coordinates for this establishment)'))
-    + '<br><a href="#" onclick="openSetLocation();return false">Set exact location</a>'
-    + (p && p.precision === 'saved' ? ' · <a href="#" onclick="clearLocation();return false">Remove saved location</a>' : '')
-    + ' · <a href="' + open + '" target="_blank" rel="noopener">Open in Google Maps</a>';
-  if (view && view.focus) view.focus(i);  // and its pin on the overview map
-  if (scroll) $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'center'});
-}
-$('gmPin').onclick = () => { gmMode = 'pin'; showGoogle(gmIndex, false); };
-$('gmName').onclick = () => { gmMode = 'name'; showGoogle(gmIndex, false); };
-$('gmSat').onclick = () => { gmSat = !gmSat; showGoogle(gmIndex, false); };
-
-// "9.93812, 76.26213", or a Google Maps link: the place's own point (!3d..!4d..)
-// is exact; "@lat,lng" is only where the map was centred.
-function parseCoords(text){
-  let s = text.trim();
-  try { s = decodeURIComponent(s); } catch (e) {}
-  const m = s.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/)
-    || s.match(/[?&](?:q|query|ll|center|destination)=(-?\d+\.\d+),\s*(-?\d+\.\d+)/)
-    || s.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)
-    || s.match(/^\(?\s*(-?\d{1,2}\.\d+)\s*[,\s]\s*(-?\d{2,3}\.\d+)\s*\)?$/);
-  return m ? {lat: +m[1], lng: +m[2]} : null;
-}
-function openSetLocation(){
-  $('gmSet').hidden = false; $('gmMsg').textContent = ''; $('gmCoords').value = ''; $('gmCoords').focus();
-}
-$('gmCancel').onclick = () => { $('gmSet').hidden = true; };
-async function postLocation(body){
-  const r = await fetch('/location', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  return r.json();
-}
-async function afterLocationChange(i){
-  await plotResults(lastPlot);   // re-read all points, including saved ones
-  gmMode = 'pin'; showGoogle(i, false);
-}
-$('gmSet').onsubmit = async ev => {
-  ev.preventDefault();
-  const i = gmIndex, text = $('gmCoords').value;
-  if (/goo\.gl|maps\.app/.test(text)) { $('gmMsg').textContent = 'Short links cannot be read. In Google Maps right-click the building and click the coordinates at the top of the menu, then paste them here.'; return; }
-  const c = parseCoords(text);
-  if (!c) { $('gmMsg').textContent = 'No coordinates found. Paste them like 9.93812, 76.26213 or paste a full Google Maps link.'; return; }
-  let d; try { d = await postLocation({index: i, lat: c.lat, lng: c.lng}); } catch (e) { d = {error: String(e)}; }
-  if (d.error) { $('gmMsg').textContent = d.error; return; }
-  $('gmSet').hidden = true;
-  afterLocationChange(i);
-};
-async function clearLocation(){
-  const i = gmIndex;
-  let d; try { d = await postLocation({index: i, lat: null}); } catch (e) { d = {error: String(e)}; }
-  if (d.error) { alert(d.error); return; }
-  $('gmSet').hidden = true;
-  afterLocationChange(i);
+  $('map').scrollIntoView({behavior: 'smooth', block: 'center'});
+  const p = lastPoints[i] && lastPoints[i].point, r = lastResults[i];
+  if (p && !['saved', 'pincode'].includes(p.precision) && r && r.has_details && !pinTried.has(i)) {
+    pinTried.add(i);
+    $('mapStatus').textContent = 'Reading the pincode from EPFO details…';
+    let d; try {
+      const res = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i})});
+      d = await res.json();
+    } catch (e) { d = {}; }
+    await plotResults(lastPlot);
+  }
+  if (view && view.focus) view.focus(i);
 }
 
 const PRECISION = {saved: 'Exact location (saved)', pincode: 'Pincode area, from EPFO details',
@@ -577,23 +462,21 @@ async function plotResults(results){
   const n = {saved: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
   const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
   lastPoints = d.points;
-  $('gmapBox').hidden = true; $('gmapFrame').removeAttribute('src');
   d.points.forEach((g, i) => {
     const p = g.point, x = results[i];
     if (!p) { n.missed++; return; }
     n[p.precision in COLOR ? p.precision : 'approx']++;
     const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
     view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c','<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
-        + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="#" onclick="showGoogle(' + i + ');return false"><b>Show on Google map</b></a>'
-        + ' · <a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
+        + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
+        + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
         + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i);
   });
   view.fit();
   $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '')
     + (n.pincode ? n.pincode + ' by pincode (teal), ' : '') + n.locality + ' at town/locality (blue), '
     + n.approx + ' at EPFO office city (orange)' + (n.missed ? ', ' + n.missed + ' not found' : '')
-    + '. Click "📍 Google map" in a row for the Google map; set the exact location there once and everyone sees it.';
-  if (d.points.length === 1 && d.points[0].point) showGoogle(0);
+    + '. Click "📍 Show on map" in a row to find it on the map.';
 }
 newCaptcha();
 </script>
@@ -709,19 +592,6 @@ class Handler(BaseHTTPRequestHandler):
                                    "name": name, "address": address, "pin": known.get("pin"),
                                    "query": ", ".join(x for x in (name, full) if x)})
                 return self._json({"points": points})
-            if self.path == "/location":
-                # Save (or clear, lat=None) the exact spot of one result row,
-                # for everyone. The establishment ID comes from this
-                # visitor's own search results, not from the request.
-                est_id = row_fields(state, state["results"][int(body["index"])])[0]
-                if not est_id:
-                    return self._json({"error": "This row has no establishment ID."})
-                lat = body.get("lat")
-                try:
-                    save_location(est_id, lat, body.get("lng") if lat is not None else None)
-                except OSError as e:
-                    return self._json({"error": f"Could not save on the server: {e.strerror}"})
-                return self._json({"ok": True})
         except (requests.RequestException, IndexError, KeyError, ValueError, TypeError) as e:
             return self._json({"error": f"Failed: {e}"})
         self._json({"error": "unknown path"}, 404)

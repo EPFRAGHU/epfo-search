@@ -28,8 +28,8 @@ stop and start it again.
 3. **Build Pack:** `Dockerfile`. **Ports Exposes:** `8765`.
 4. **Domains:** `https://epfo.epf-dashboard.online` (your subdomain). Save, then **Deploy**.
 
-5. **Persistent Storage** > Add > Volume, destination path `/data`. Exact
-   locations people save are kept there; without it they are lost on redeploy.
+5. **Persistent Storage** > Add > Volume, destination path `/data`. Pincodes
+   read from EPFO details are kept there; without it they are lost on redeploy.
 
 Coolify's proxy adds the route and a Let's Encrypt certificate, and other
 apps are not touched. Enable auto-deploy in the app's settings to redeploy
@@ -154,7 +154,7 @@ systemctl restart epfo-search       # restart
   address, or at the EPFO office city; "Open in Google Maps" in each pin
   searches the full address. Rebuild the list with `tools/build_places.py`.
 - Pincodes: when an establishment's EPFO details are read (View details, or
-  its Google map button), its pincode and full address are kept in
+  its "Show on map" button), its pincode and full address are kept in
   `EPFO_DATA_DIR/est_addresses.json` and its pin moves to that pincode
   (`data/in_pincodes.tsv.gz`, GeoNames postal codes, median of each pincode's
   post offices; rebuild with `tools/build_pincodes.py`). Saved exact
