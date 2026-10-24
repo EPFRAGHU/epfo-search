@@ -20,7 +20,19 @@ python epfo_web.py
 Open http://localhost:8765. Stop with `Ctrl+C`. After changing the code,
 stop and start it again.
 
-## Put it on a Hostinger VPS
+## Run on Coolify (recommended if your VPS has Coolify)
+
+1. DNS: add an `A` record for the subdomain (e.g. `epfo`) pointing to the VPS IP.
+2. Coolify > Projects > your project > **+ New** > **Public Repository**:
+   `https://github.com/EPFRAGHU/epfo-search`, branch `main`.
+3. **Build Pack:** `Dockerfile`. **Ports Exposes:** `8765`.
+4. **Domains:** `https://epfo.epf-dashboard.online` (your subdomain). Save, then **Deploy**.
+
+Coolify's proxy adds the route and a Let's Encrypt certificate, and other
+apps are not touched. Enable auto-deploy in the app's settings to redeploy
+on every push to `main`.
+
+## Put it on a Hostinger VPS (without Coolify)
 
 Tested target: Ubuntu 22.04 / 24.04 (Hostinger's default VPS images).
 

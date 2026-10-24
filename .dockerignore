@@ -1,0 +1,12 @@
+.git
+.github
+.claude
+build
+__pycache__
+*.pyc
+.venv
+venv
+geocode_cache.json
+last_search_response.html
+data/in_places.sqlite
+data/in_places.sqlite.tmp
