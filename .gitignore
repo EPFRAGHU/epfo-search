@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Created while running
+geocode_cache.json
+geocode_cache.json.tmp
+last_search_response.html
+
+# Local Claude Code settings
+.claude/settings.local.json

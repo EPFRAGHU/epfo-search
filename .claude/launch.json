@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "epfo-search",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["C:\\Users\\Dell\\Documents\\epfo-search\\epfo_web.py"],
+      "port": 8765
+    }
+  ]
+}

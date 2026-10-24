@@ -1,0 +1,34 @@
+# On every push to main: log in to the VPS, pull the new code, restart.
+#
+# Needs these repository secrets (GitHub > Settings > Secrets and variables > Actions):
+#   VPS_HOST     VPS IP address or domain
+#   VPS_SSH_KEY  private SSH key whose public half is in /home/epfo/.ssh/authorized_keys
+#   VPS_PORT     optional, SSH port if not 22
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull and restart on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          username: epfo
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/epfo-search
+            git pull --ff-only
+            .venv/bin/pip install -q -r requirements.txt
+            sudo /usr/bin/systemctl restart epfo-search
+            sleep 2
+            curl -fsS -o /dev/null http://127.0.0.1:8765/ && echo "App is up"
