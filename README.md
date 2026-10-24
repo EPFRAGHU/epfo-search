@@ -8,7 +8,7 @@ talks to the EPFO public portal for you.
 - `epfo_lookup.py` – EPFO portal client; also a terminal version (`python epfo_lookup.py`, needs `pip install pillow` too)
 - `epfo_geocode.py` – turns addresses into map points with OpenStreetMap Nominatim (free, cached)
 - `deploy/` – files for running on a VPS
-- `.github/workflows/deploy.yml` – auto-deploy to the VPS on every push to `main`
+- `Dockerfile` – container image, used by Coolify
 
 ## Run on your PC
 
@@ -115,34 +115,10 @@ apt-get install -y certbot python3-certbot-nginx
 certbot --nginx -d <your-domain>
 ```
 
-### 4. Auto-deploy from GitHub
+### 4. Updating
 
-Every push to `main` then updates the VPS by itself.
-
-On your PC, make a key used only for deploying:
-
-```
-ssh-keygen -t ed25519 -N "" -f epfo_deploy_key
-```
-
-Put the **public** key on the VPS:
-
-```
-mkdir -p /home/epfo/.ssh
-echo "<contents of epfo_deploy_key.pub>" >> /home/epfo/.ssh/authorized_keys
-chown -R epfo:epfo /home/epfo/.ssh && chmod 700 /home/epfo/.ssh && chmod 600 /home/epfo/.ssh/authorized_keys
-```
-
-On GitHub: repository > Settings > Secrets and variables > Actions > New secret:
-
-| Name | Value |
-|---|---|
-| `VPS_HOST` | VPS IP or domain |
-| `VPS_SSH_KEY` | full contents of `epfo_deploy_key` (the private key) |
-| `VPS_PORT` | only if SSH is not on port 22 |
-
-Delete both key files from your PC afterwards (or keep them somewhere safe,
-never in the repo). Test it: GitHub > Actions > Deploy to VPS > Run workflow.
+Run the same `setup.sh` command again; it pulls the latest code from GitHub
+and restarts the app. (On Coolify, use Redeploy or Auto Deploy instead.)
 
 ## Useful commands on the VPS
 

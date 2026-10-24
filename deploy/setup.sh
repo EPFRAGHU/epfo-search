@@ -221,11 +221,6 @@ systemctl daemon-reload
 systemctl enable "$SERVICE"
 systemctl restart "$SERVICE"
 
-# Lets GitHub Actions (logging in as $APP_USER) restart this app, nothing else.
-echo "$APP_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart $SERVICE" > /etc/sudoers.d/epfo-search
-chmod 440 /etc/sudoers.d/epfo-search
-visudo -cf /etc/sudoers.d/epfo-search >/dev/null
-
 if [ "$has_nginx" = 1 ]; then
     if [ "$is_ip" = 1 ]; then nginx_listen=$PUBLIC_PORT; name=_; else nginx_listen=80; name=$SERVER_NAME; fi
     sed -e "s/LISTEN_PORT/$nginx_listen/" -e "s/SERVER_NAME/$name/" -e "s/APP_PORT/$APP_PORT/" \
