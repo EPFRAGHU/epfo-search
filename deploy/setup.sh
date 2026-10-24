@@ -61,8 +61,13 @@ ours=0
 is_ip=0
 [[ "$SERVER_NAME" =~ ^[0-9.]+$ || "$SERVER_NAME" == *:* ]] && is_ip=1
 
+# Use nginx only if it is installed AND running. A stopped nginx is left
+# alone: starting it could clash with whatever else serves port 80.
 has_nginx=0
-command -v nginx >/dev/null && [ -d /etc/nginx/sites-available ] && has_nginx=1
+nginx_stopped=0
+if command -v nginx >/dev/null && [ -d /etc/nginx/sites-available ]; then
+    if systemctl is-active -q nginx; then has_nginx=1; else nginx_stopped=1; fi
+fi
 
 echo "== Checking the server (nothing changed yet)"
 if [ "$has_nginx" = 1 ]; then
@@ -73,7 +78,11 @@ if [ "$has_nginx" = 1 ]; then
         say "mode: nginx on port 80 for $SERVER_NAME only -> app on 127.0.0.1:$APP_PORT"
     fi
 else
-    say "nginx: not installed (will NOT be installed)"
+    if [ "$nginx_stopped" = 1 ]; then
+        say "nginx: installed but not running (left as it is, not started)"
+    else
+        say "nginx: not installed (will NOT be installed)"
+    fi
     say "mode: app listens directly on port $PUBLIC_PORT"
 fi
 
@@ -227,6 +236,9 @@ if [ "$has_nginx" = 1 ]; then
         exit 1
     fi
     systemctl reload nginx
+elif [ -f "$SITE" ] || [ -L /etc/nginx/sites-enabled/epfo-search ]; then
+    # Not using nginx (any more): drop only this app's own site file.
+    rm -f /etc/nginx/sites-enabled/epfo-search "$SITE"
 fi
 
 if [ "$has_nginx" = 0 ] || [ "$is_ip" = 1 ]; then
