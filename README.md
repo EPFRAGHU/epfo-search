@@ -133,6 +133,12 @@ systemctl restart epfo-search       # restart
 - Each visitor gets their own EPFO session (cookie), so several people can search at once.
 - The EPFO portal may refuse requests from some data-centre IPs. If searches
   fail only on the VPS, check `journalctl` and `last_search_response.html` in `/opt/epfo-search`.
+- **Google map (optional):** set the environment variable `GOOGLE_MAPS_API_KEY`
+  (Coolify: app > Environment Variables) to show the real Google map with
+  roads, landmarks, terrain and satellite. It loads with `region=IN`, so Google
+  draws India's official boundary. In Google Cloud enable "Maps JavaScript API"
+  and restrict the key to `https://search.epf-dashboard.online/*`. Without a
+  key, or if Google rejects it, the map below is used.
 - The map shows India only, drawn from India's official boundary and states
   (Survey of India map via [DataMeet](https://github.com/datameet/maps), CC BY 4.0:
   `data/india_states.geojson`, `data/india_outline.geojson`). Jammu & Kashmir

@@ -6,6 +6,8 @@ You type the captcha shown on the page; the server talks to the EPFO portal.
 Settings (environment variables):
   EPFO_HOST  address to listen on (default 127.0.0.1; a VPS behind nginx keeps this)
   EPFO_PORT  port to listen on (default 8765)
+  GOOGLE_MAPS_API_KEY  optional; shows the real Google map (region India).
+             Restrict the key to your site's address in Google Cloud.
 """
 
 import json
@@ -22,6 +24,7 @@ from epfo_geocode import geocode
 from epfo_lookup import EpfoClient
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
+GMAPS_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
 PORT = int(os.environ.get("EPFO_PORT", "8765"))
 # India's official boundary and states (Survey of India via DataMeet, CC BY 4.0)
 MAP_FILES = {f"/map/{n}": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", n)
@@ -91,7 +94,7 @@ PAGE = r"""<!doctype html>
   .st-label::before { display:none; }
   #map.far .st-label { display:none; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
-  .leaflet-popup-content { font-size:13px; line-height:1.45; color:#1c2430; }
+  .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
   /* Payment calendar: financial years as rows, March..February as columns */
   .cal { border-collapse:separate; border-spacing:4px; width:auto; min-width:100%; }
   .cal th, .cal td { border:0; padding:0; text-align:center; vertical-align:middle; background:none; }
@@ -299,15 +302,61 @@ function showPay(k, btn){
   $('payDetail').innerHTML = '<h3>' + label + ' · ' + list.length + ' credit' + (list.length > 1 ? 's' : '') + ' · ' + fullMoney(total) + '</h3>'
     + table(list.map(r => want.map(([n, i]) => n === 'Amount' ? fullMoney(num(r[i])) : r[i])), want.map(([n]) => n));
 }
-// Map: India only, drawn from India's official boundary (Survey of India
-// map via DataMeet: Jammu & Kashmir with PoK, Ladakh with Gilgit-Baltistan
-// and Aksai Chin). No world map tiles, so no other boundary appears.
+// Map. With a Google Maps API key (GOOGLE_MAPS_API_KEY on the server) this is
+// the real Google map (roads, landmarks, terrain, satellite) with region=IN,
+// so Google draws India's official boundary. Without a key, or if Google
+// rejects the key, it falls back to an India-only map drawn from India's
+// official boundary (Survey of India map via DataMeet: Jammu & Kashmir with
+// PoK, Ladakh with Gilgit-Baltistan and Aksai Chin).
 // The server places every result in one request from its local list of
 // Indian places, so all pins appear together.
-let map, pins, plotRun = 0;
-async function makeMap(){
+const GMAPS_KEY = __GMAPS_KEY__;
+let view = null, plotRun = 0, lastPlot = null;
+
+function loadGoogle(){
+  return new Promise((resolve, reject) => {
+    window.__gmapsReady = resolve;
+    // Google calls this when the key is invalid or not allowed for this site
+    window.gm_authFailure = () => { googleFailed = true; freshMapBox(); view = null; if (lastPlot) plotResults(lastPlot); };
+    const s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(GMAPS_KEY)
+      + '&region=IN&language=en&loading=async&callback=__gmapsReady';
+    s.async = true; s.onerror = () => reject(new Error('Google Maps did not load'));
+    document.head.appendChild(s);
+  });
+}
+let googleFailed = false;
+// Empty #map element, so the fallback map does not inherit Google's leftovers
+function freshMapBox(){ const old = $('map'), box = document.createElement('div'); box.id = 'map'; old.replaceWith(box); }
+
+async function googleView(){
+  await loadGoogle();
+  const g = google.maps;
+  const map = new g.Map($('map'), {center: {lat: 22.5, lng: 80}, zoom: 5, mapTypeId: 'roadmap',
+    mapTypeControl: true, mapTypeControlOptions: {mapTypeIds: ['roadmap', 'terrain', 'satellite', 'hybrid']},
+    streetViewControl: true, fullscreenControl: true, gestureHandling: 'greedy'});
+  const info = new g.InfoWindow();
+  let markers = [];
+  return {
+    clear(){ markers.forEach(m => m.setMap(null)); markers = []; info.close(); },
+    add(lat, lng, good, html){
+      const m = new g.Marker({position: {lat, lng}, map, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
+        fillColor: good ? '#1f5fbf' : '#c2410c', fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
+      m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); });
+      markers.push(m);
+    },
+    fit(){
+      if (!markers.length) return;
+      const b = new g.LatLngBounds(); markers.forEach(m => b.extend(m.getPosition()));
+      map.fitBounds(b, 40);
+      g.event.addListenerOnce(map, 'idle', () => { if (map.getZoom() > 13) map.setZoom(13); });
+    },
+  };
+}
+
+async function indiaView(){
   const css = getComputedStyle(document.documentElement), v = n => css.getPropertyValue(n).trim();
-  map = L.map('map', {zoomSnap: 0.25, minZoom: 4, maxZoom: 12, maxBounds: [[2, 60], [42, 104]], maxBoundsViscosity: 0.8,
+  const map = L.map('map', {zoomSnap: 0.25, minZoom: 4, maxZoom: 12, maxBounds: [[2, 60], [42, 104]], maxBoundsViscosity: 0.8,
                       attributionControl: true}).fitBounds([[6.5, 68], [37.2, 97.5]]);
   map.attributionControl.setPrefix('').addAttribution(
     'India boundary: Survey of India via <a href="https://github.com/datameet/maps" target="_blank" rel="noopener">DataMeet</a> (CC BY 4.0) · Places © GeoNames');
@@ -320,16 +369,31 @@ async function makeMap(){
   L.geoJSON(outline, {style: {color: v('--map-border'), weight: 1.6, fill: false}, interactive: false}).addTo(map);
   const far = () => $('map').classList.toggle('far', map.getZoom() < 5.5);
   map.on('zoomend', far); far();
-  pins = L.featureGroup().addTo(map);
+  const pins = L.featureGroup().addTo(map);
+  return {
+    clear(){ pins.clearLayers(); map.invalidateSize(); },
+    add(lat, lng, good, html){
+      L.circleMarker([lat, lng], {radius: 8, weight: 2, color: good ? '#1f5fbf' : '#c2410c', fillOpacity: .55}).bindPopup(html).addTo(pins);
+    },
+    fit(){ if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]}); },
+  };
 }
+
+async function makeView(){
+  if (GMAPS_KEY && !googleFailed) {
+    try { return await googleView(); } catch (e) { googleFailed = true; freshMapBox(); }
+  }
+  return indiaView();
+}
+
 const PRECISION = {locality: 'Town/locality from the address', office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
+  lastPlot = results;
   $('mapCard').hidden = false;
   $('mapStatus').textContent = 'Placing ' + results.length + ' on the map…';
-  if (!map) await makeMap();
-  pins.clearLayers();
-  map.invalidateSize();
+  if (!view) view = await makeView();
+  view.clear();
   let d;
   try {
     const r = await fetch('/geocode', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
@@ -344,19 +408,17 @@ async function plotResults(results){
     const good = p.precision === 'locality';
     good ? town++ : approx++;
     const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
-    L.circleMarker([p.lat, p.lng], {radius: 8, weight: 2, color: good ? '#1f5fbf' : '#c2410c', fillOpacity: .55})
-      .bindPopup('<b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
+    view.add(p.lat, p.lng, good, '<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
         + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
-        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : ''))
-      .addTo(pins);
+        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>');
   });
-  if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]});
+  view.fit();
   $('mapStatus').textContent = town + ' at town/locality (blue), ' + approx + ' at EPFO office city (orange)'
     + (missed ? ', ' + missed + ' not found' : '') + '. For the exact spot use "Open in Google Maps".';
 }
 newCaptcha();
 </script>
-</main></body></html>"""
+</main></body></html>""".replace("__GMAPS_KEY__", json.dumps(GMAPS_KEY))
 
 
 class Handler(BaseHTTPRequestHandler):
