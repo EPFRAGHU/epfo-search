@@ -196,6 +196,14 @@ $('f').onsubmit = async ev => {
   $('go').disabled = false; $('go').textContent = 'Search';
   newCaptcha();
 };
+// The server no longer has this search (it restarted, or the search was
+// idle too long): back to the form with a fresh captcha, search text kept.
+function searchAgain(){
+  newCaptcha();
+  $('msg').textContent = 'This search has expired (the app was updated or idle). Type the new captcha and press Search again.';
+  $('f').scrollIntoView({behavior: 'smooth', block: 'start'});
+  $('cap').focus({preventScroll: true});
+}
 async function details(i){
   $('details').innerHTML = '<div class="card">Loading details…</div>';
   let d;
@@ -203,6 +211,7 @@ async function details(i){
     const r = await fetch('/details', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i, search: searchId})});
     d = await r.json();
   } catch (e) { d = {error: 'Request failed: ' + e}; }
+  if (d.expired) { $('details').innerHTML = ''; return searchAgain(); }
   if (d.error) {
     $('details').innerHTML = '<div class="card msg">' + esc(d.error) + '</div>';
     $('details').scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -466,7 +475,7 @@ async function plotResults(results){
     d = await r.json();
   } catch (e) { d = {error: 'Request failed: ' + e}; }
   if (run !== plotRun) return;  // a newer search started
-  if (d.error) { $('mapStatus').textContent = d.error; return; }
+  if (d.error) { $('mapStatus').textContent = d.error; if (d.expired) searchAgain(); return; }
   const n = {saved: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
   const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
   lastPoints = d.points;
