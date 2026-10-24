@@ -96,6 +96,8 @@ PAGE = r"""<!doctype html>
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
   #gmapBox { margin-top:14px; }
+  tr.sel td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
+  .nowrap { white-space:nowrap; }
   .gm-head { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; justify-content:space-between; margin-bottom:8px; }
   .gm-head .tabs { margin:0; }
   #gmapFrame { width:100%; height:420px; border:1px solid var(--line); border-radius:8px; display:block; background:var(--bg); }
@@ -176,12 +178,14 @@ $('f').onsubmit = async ev => {
     else {
       let h = '<div class="card"><h2>' + d.results.length + ' result(s)</h2>';
       h += '<div class="wrap"><table>';
-      if (d.header.length) h += '<tr>' + d.header.map(x => '<th>'+esc(x)+'</th>').join('') + '<th></th></tr>';
+      if (d.header.length) h += '<tr>' + d.header.map(x => '<th>'+esc(x)+'</th>').join('') + '<th></th><th>Map</th></tr>';
       d.results.forEach((x, i) => {
-        h += '<tr>' + x.cells.map(c => '<td>'+esc(c)+'</td>').join('')
-          + '<td>' + (x.has_details ? '<button class="link" onclick="details(' + i + ')">View details</button>' : '') + '</td></tr>';
+        h += '<tr id="row' + i + '">' + x.cells.map(c => '<td>'+esc(c)+'</td>').join('')
+          + '<td>' + (x.has_details ? '<button class="link" onclick="details(' + i + ')">View details</button>' : '') + '</td>'
+          + '<td><button class="link nowrap" onclick="showGoogle(' + i + ')" title="Show this establishment on Google map">📍 Google map</button></td></tr>';
       });
       $('out').innerHTML = h + '</table></div></div>';
+      lastResults = d.results; lastHeader = d.header;
       plotResults(d.results);
     }
   } catch (e) { $('msg').textContent = 'Request failed: ' + e; }
@@ -346,14 +350,19 @@ async function googleView(){
     mapTypeControl: true, mapTypeControlOptions: {mapTypeIds: ['roadmap', 'terrain', 'satellite', 'hybrid']},
     streetViewControl: true, fullscreenControl: true, gestureHandling: 'greedy'});
   const info = new g.InfoWindow();
-  let markers = [];
+  let markers = [], byIndex = {};
   return {
-    clear(){ markers.forEach(m => m.setMap(null)); markers = []; info.close(); },
-    add(lat, lng, good, html){
+    clear(){ markers.forEach(m => m.setMap(null)); markers = []; byIndex = {}; info.close(); },
+    add(lat, lng, good, html, i){
       const m = new g.Marker({position: {lat, lng}, map, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
         fillColor: good ? '#1f5fbf' : '#c2410c', fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
       m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); });
-      markers.push(m);
+      markers.push(m); byIndex[i] = [m, html];
+    },
+    focus(i){
+      const e = byIndex[i]; if (!e) return;
+      map.setCenter(e[0].getPosition()); map.setZoom(Math.max(map.getZoom(), 8));
+      info.setContent(e[1]); info.open({map, anchor: e[0]});
     },
     fit(){
       if (!markers.length) return;
@@ -380,10 +389,17 @@ async function indiaView(){
   const far = () => $('map').classList.toggle('far', map.getZoom() < 5.5);
   map.on('zoomend', far); far();
   const pins = L.featureGroup().addTo(map);
+  let byIndex = {};
   return {
-    clear(){ pins.clearLayers(); map.invalidateSize(); },
-    add(lat, lng, good, html){
-      L.circleMarker([lat, lng], {radius: 8, weight: 2, color: good ? '#1f5fbf' : '#c2410c', fillOpacity: .55}).bindPopup(html).addTo(pins);
+    clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
+    add(lat, lng, good, html, i){
+      byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color: good ? '#1f5fbf' : '#c2410c', fillOpacity: .55})
+        .bindPopup(html).addTo(pins);
+    },
+    focus(i){
+      const m = byIndex[i]; if (!m) return;
+      map.setView(m.getLatLng(), Math.max(map.getZoom(), 7), {animate: false});
+      m.openPopup();
     },
     fit(){ if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]}); },
   };
@@ -398,16 +414,31 @@ async function makeView(){
 
 // Google map of one establishment: Google's free embedded map (no key, no
 // billing) finds the address itself and shows roads, landmarks and satellite.
-let lastPoints = [], gmIndex = -1;
+let lastPoints = [], lastResults = [], lastHeader = [], gmIndex = -1;
+
+// Name and search text for row i: from the map lookup when it has run,
+// otherwise straight from the table (Name, Address, Office columns).
+function placeOf(i){
+  if (lastPoints[i]) return {name: lastPoints[i].name, query: lastPoints[i].query};
+  const r = lastResults[i]; if (!r) return null;
+  const col = (w, d) => { const k = lastHeader.findIndex(h => h.toLowerCase().includes(w)); return r.cells[k >= 0 ? k : d] || ''; };
+  const name = col('name', 1);
+  return {name, query: [name, col('address', 2), col('office', 3)].filter(Boolean).join(', ')};
+}
+
 function showGoogle(i, sat){
-  const g = lastPoints[i]; if (!g) return;
+  const g = placeOf(i); if (!g) return;
   gmIndex = i;
+  document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
+  if ($('row' + i)) $('row' + i).classList.add('sel');
+  $('mapCard').hidden = false;
   $('gmapBox').hidden = false;
   $('gmapTitle').textContent = 'Google map: ' + g.name;
   $('gmRoad').classList.toggle('on', !sat); $('gmSat').classList.toggle('on', !!sat);
   $('gmapFrame').src = 'https://maps.google.com/maps?q=' + encodeURIComponent(g.query)
     + '&hl=en&gl=IN&z=15' + (sat ? '&t=k' : '') + '&output=embed';
-  $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  if (view && view.focus) view.focus(i);  // and its pin on the overview map
+  $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 $('gmRoad').onclick = () => showGoogle(gmIndex, false);
 $('gmSat').onclick = () => showGoogle(gmIndex, true);
@@ -439,7 +470,7 @@ async function plotResults(results){
     view.add(p.lat, p.lng, good, '<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
         + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="#" onclick="showGoogle(' + i + ');return false"><b>Show on Google map</b></a>'
         + ' · <a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
-        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>');
+        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i);
   });
   view.fit();
   $('mapStatus').textContent = town + ' at town/locality (blue), ' + approx + ' at EPFO office city (orange)'
