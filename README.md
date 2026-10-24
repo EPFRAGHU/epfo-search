@@ -145,6 +145,12 @@ systemctl restart epfo-search       # restart
 - Each visitor gets their own EPFO session (cookie), so several people can search at once.
 - The EPFO portal may refuse requests from some data-centre IPs. If searches
   fail only on the VPS, check `journalctl` and `last_search_response.html` in `/opt/epfo-search`.
+- The map shows India only, drawn from India's official boundary and states
+  (Survey of India map via [DataMeet](https://github.com/datameet/maps), CC BY 4.0:
+  `data/india_states.geojson`, `data/india_outline.geojson`). Jammu & Kashmir
+  includes PoK; Ladakh includes Gilgit-Baltistan and Aksai Chin. No world map
+  tiles are loaded. Rebuilt from DataMeet `States/Admin2.shp` with
+  `mapshaper Admin2.shp -rename-fields name=ST_NM -simplify 3% keep-shapes -clean`.
 - Map pins come from a local list of Indian places (`data/in_places.tsv.gz`,
   from [GeoNames](https://www.geonames.org), CC BY 4.0), so a whole result
   list is placed in milliseconds. Pins are at the town/locality named in the

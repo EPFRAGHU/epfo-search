@@ -23,6 +23,9 @@ from epfo_lookup import EpfoClient
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
 PORT = int(os.environ.get("EPFO_PORT", "8765"))
+# India's official boundary and states (Survey of India via DataMeet, CC BY 4.0)
+MAP_FILES = {f"/map/{n}": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", n)
+             for n in ("india_states.geojson", "india_outline.geojson")}
 SESSION_TTL = 30 * 60  # seconds a visitor's search stays usable while idle
 MAX_SESSIONS = 1000
 
@@ -58,9 +61,11 @@ PAGE = r"""<!doctype html>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --text:#1c2430; --muted:#5b6675; --line:#dde2e8; --accent:#1f5fbf; --err:#b42318;
-          --paid-bg:#dcfce7; --paid-fg:#14532d; --paid-line:#86efac; --due-bg:#fee2e2; --due-fg:#7f1d1d; --due-line:#fca5a5; }
+          --paid-bg:#dcfce7; --paid-fg:#14532d; --paid-line:#86efac; --due-bg:#fee2e2; --due-fg:#7f1d1d; --due-line:#fca5a5;
+          --map-sea:#eef3f8; --map-land:#fdfcf8; --map-state:#b9c2cc; --map-border:#4b5563; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --card:#1d2128; --text:#e6e9ee; --muted:#9aa4b2; --line:#2f3540; --accent:#6aa0ff; --err:#ff7b72;
-          --paid-bg:#123d24; --paid-fg:#bbf7d0; --paid-line:#1f6b3d; --due-bg:#45191b; --due-fg:#fecaca; --due-line:#7f2a2d; } }
+          --paid-bg:#123d24; --paid-fg:#bbf7d0; --paid-line:#1f6b3d; --due-bg:#45191b; --due-fg:#fecaca; --due-line:#7f2a2d;
+          --map-sea:#111820; --map-land:#232a33; --map-state:#46505c; --map-border:#c5ccd6; } }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, Segoe UI, sans-serif; }
   main { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
@@ -81,7 +86,10 @@ PAGE = r"""<!doctype html>
   th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top; }
   th { background:var(--bg); }
   h2 { font-size:16px; margin:0 0 10px; }
-  #map { height:460px; border-radius:8px; border:1px solid var(--line); }
+  #map { height:520px; border-radius:8px; border:1px solid var(--line); background:var(--map-sea); }
+  .st-label { background:none; border:0; box-shadow:none; color:var(--muted); font-size:11px; font-weight:600; padding:0; }
+  .st-label::before { display:none; }
+  #map.far .st-label { display:none; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content { font-size:13px; line-height:1.45; color:#1c2430; }
   /* Payment calendar: financial years as rows, March..February as columns */
@@ -291,20 +299,35 @@ function showPay(k, btn){
   $('payDetail').innerHTML = '<h3>' + label + ' · ' + list.length + ' credit' + (list.length > 1 ? 's' : '') + ' · ' + fullMoney(total) + '</h3>'
     + table(list.map(r => want.map(([n, i]) => n === 'Amount' ? fullMoney(num(r[i])) : r[i])), want.map(([n]) => n));
 }
-// Map: the server places every result in one request from its local list
-// of Indian places, so all pins appear together.
+// Map: India only, drawn from India's official boundary (Survey of India
+// map via DataMeet: Jammu & Kashmir with PoK, Ladakh with Gilgit-Baltistan
+// and Aksai Chin). No world map tiles, so no other boundary appears.
+// The server places every result in one request from its local list of
+// Indian places, so all pins appear together.
 let map, pins, plotRun = 0;
+async function makeMap(){
+  const css = getComputedStyle(document.documentElement), v = n => css.getPropertyValue(n).trim();
+  map = L.map('map', {zoomSnap: 0.25, minZoom: 4, maxZoom: 12, maxBounds: [[2, 60], [42, 104]], maxBoundsViscosity: 0.8,
+                      attributionControl: true}).fitBounds([[6.5, 68], [37.2, 97.5]]);
+  map.attributionControl.setPrefix('').addAttribution(
+    'India boundary: Survey of India via <a href="https://github.com/datameet/maps" target="_blank" rel="noopener">DataMeet</a> (CC BY 4.0) · Places © GeoNames');
+  const [states, outline] = await Promise.all(['/map/india_states.geojson', '/map/india_outline.geojson']
+    .map(u => fetch(u).then(r => r.json())));
+  L.geoJSON(states, {
+    style: {color: v('--map-state'), weight: 0.8, fillColor: v('--map-land'), fillOpacity: 1},
+    onEachFeature: (f, layer) => layer.bindTooltip(f.properties.name, {permanent: true, direction: 'center', className: 'st-label'}),
+  }).addTo(map);
+  L.geoJSON(outline, {style: {color: v('--map-border'), weight: 1.6, fill: false}, interactive: false}).addTo(map);
+  const far = () => $('map').classList.toggle('far', map.getZoom() < 5.5);
+  map.on('zoomend', far); far();
+  pins = L.featureGroup().addTo(map);
+}
 const PRECISION = {locality: 'Town/locality from the address', office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
   $('mapCard').hidden = false;
   $('mapStatus').textContent = 'Placing ' + results.length + ' on the map…';
-  if (!map) {
-    map = L.map('map').setView([22.5, 79], 5);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
-    pins = L.featureGroup().addTo(map);
-  }
+  if (!map) await makeMap();
   pins.clearLayers();
   map.invalidateSize();
   let d;
@@ -329,8 +352,7 @@ async function plotResults(results){
   });
   if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]});
   $('mapStatus').textContent = town + ' at town/locality (blue), ' + approx + ' at EPFO office city (orange)'
-    + (missed ? ', ' + missed + ' not found' : '') + '. For the exact spot use "Open in Google Maps". '
-    + 'Places © GeoNames, map © OpenStreetMap.';
+    + (missed ? ', ' + missed + ' not found' : '') + '. For the exact spot use "Open in Google Maps".';
 }
 newCaptcha();
 </script>
@@ -347,10 +369,10 @@ class Handler(BaseHTTPRequestHandler):
             sid = self._new_sid = secrets.token_urlsafe(32)
         return get_state(sid)
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, cache="no-store"):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         if getattr(self, "_new_sid", None):
             self.send_header("Set-Cookie", f"sid={self._new_sid}; Path=/; HttpOnly; SameSite=Lax")
         self.end_headers()
@@ -363,6 +385,9 @@ class Handler(BaseHTTPRequestHandler):
         state = self._session()
         if self.path == "/":
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+        elif self.path in MAP_FILES:
+            with open(MAP_FILES[self.path], "rb") as f:
+                self._send(200, f.read(), "application/geo+json", cache="public, max-age=86400")
         elif self.path.startswith("/captcha"):
             # Fresh EPFO session for every captcha: new cookie + new HDIV tokens
             try:
