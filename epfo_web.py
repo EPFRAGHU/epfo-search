@@ -95,6 +95,10 @@ PAGE = r"""<!doctype html>
   #map.far .st-label { display:none; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
+  #gmapBox { margin-top:14px; }
+  .gm-head { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .gm-head .tabs { margin:0; }
+  #gmapFrame { width:100%; height:420px; border:1px solid var(--line); border-radius:8px; display:block; background:var(--bg); }
   /* Payment calendar: financial years as rows, March..February as columns */
   .cal { border-collapse:separate; border-spacing:4px; width:auto; min-width:100%; }
   .cal th, .cal td { border:0; padding:0; text-align:center; vertical-align:middle; background:none; }
@@ -136,6 +140,11 @@ PAGE = r"""<!doctype html>
     <h2>Map</h2>
     <p id="mapStatus"></p>
     <div id="map"></div>
+    <div id="gmapBox" hidden>
+      <div class="gm-head"><b id="gmapTitle"></b>
+        <span class="tabs"><button id="gmRoad" class="on" type="button">Map</button><button id="gmSat" type="button">Satellite</button></span></div>
+      <iframe id="gmapFrame" title="Google map" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
+    </div>
   </div>
   <div id="details"></div>
 <script>
@@ -192,6 +201,7 @@ async function details(i){
     if (pay) return paymentCard(s.rows);
     return '<div class="card"><h2>' + esc(s.title) + '</h2>' + table(s.rows) + '</div>';
   }).join('');
+  if (lastPoints[i]) showGoogle(i);  // Google map of this establishment, above the details
   $('details').scrollIntoView({behavior:'smooth'});
 }
 
@@ -386,6 +396,22 @@ async function makeView(){
   return indiaView();
 }
 
+// Google map of one establishment: Google's free embedded map (no key, no
+// billing) finds the address itself and shows roads, landmarks and satellite.
+let lastPoints = [], gmIndex = -1;
+function showGoogle(i, sat){
+  const g = lastPoints[i]; if (!g) return;
+  gmIndex = i;
+  $('gmapBox').hidden = false;
+  $('gmapTitle').textContent = 'Google map: ' + g.name;
+  $('gmRoad').classList.toggle('on', !sat); $('gmSat').classList.toggle('on', !!sat);
+  $('gmapFrame').src = 'https://maps.google.com/maps?q=' + encodeURIComponent(g.query)
+    + '&hl=en&gl=IN&z=15' + (sat ? '&t=k' : '') + '&output=embed';
+  $('gmapBox').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+$('gmRoad').onclick = () => showGoogle(gmIndex, false);
+$('gmSat').onclick = () => showGoogle(gmIndex, true);
+
 const PRECISION = {locality: 'Town/locality from the address', office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
@@ -402,6 +428,8 @@ async function plotResults(results){
   if (run !== plotRun) return;  // a newer search started
   if (d.error) { $('mapStatus').textContent = d.error; return; }
   let town = 0, approx = 0, missed = 0;
+  lastPoints = d.points;
+  $('gmapBox').hidden = true; $('gmapFrame').removeAttribute('src');
   d.points.forEach((g, i) => {
     const p = g.point, x = results[i];
     if (!p) { missed++; return; }
@@ -409,12 +437,14 @@ async function plotResults(results){
     good ? town++ : approx++;
     const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
     view.add(p.lat, p.lng, good, '<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
-        + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
+        + '<br><i>' + esc(PRECISION[p.precision]) + '</i><br><a href="#" onclick="showGoogle(' + i + ');return false"><b>Show on Google map</b></a>'
+        + ' · <a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
         + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>');
   });
   view.fit();
   $('mapStatus').textContent = town + ' at town/locality (blue), ' + approx + ' at EPFO office city (orange)'
-    + (missed ? ', ' + missed + ' not found' : '') + '. For the exact spot use "Open in Google Maps".';
+    + (missed ? ', ' + missed + ' not found' : '') + '. Click a pin, then "Show on Google map" for the exact address with roads and landmarks.';
+  if (d.points.length === 1 && d.points[0].point) showGoogle(0);
 }
 newCaptcha();
 </script>
