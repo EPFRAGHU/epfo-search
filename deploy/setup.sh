@@ -47,6 +47,13 @@ fi
 
 port_owner() { ss -ltnpH "sport = :$1" 2>/dev/null | head -1; }
 
+# First free port after $1, skipping the ones this app already uses.
+free_port() {
+    local p=$(( $1 + 1 ))
+    while [ -n "$(port_owner "$p")" ] || [ "$p" = "$APP_PORT" ] || [ "$p" = "$PUBLIC_PORT" ]; do p=$((p + 1)); done
+    echo "$p"
+}
+
 # Our own install from an earlier run is fine to update.
 ours=0
 [ -f "$UNIT" ] && grep -q "/opt/epfo-search" "$UNIT" && ours=1
@@ -80,7 +87,7 @@ check_port() {
         elif [ "$why" = nginx ] && echo "$owner" | grep -q nginx && [ -f "$SITE" ]; then
             say "port $p: nginx, from this app's site (ok)"
         else
-            fail "port $p is already used by: $(echo "$owner" | grep -o 'users:.*')  -> run with $var=<a free port>"
+            fail "port $p is already used by: $(echo "$owner" | grep -o 'users:.*')  -> run with $var=$(free_port "$p")"
         fi
     else
         say "port $p: free"
@@ -107,10 +114,15 @@ if [ -f "$UNIT" ] && [ "$ours" = 0 ]; then fail "a different service called $SER
 if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
     fail "$APP_DIR exists and is not this app"
 fi
-if [ -d "$APP_DIR/.git" ] && ! git -C "$APP_DIR" remote get-url origin 2>/dev/null | grep -q "epfo-search"; then
+# The repo belongs to $APP_USER; root must say it trusts it or git refuses to read it.
+if [ -d "$APP_DIR/.git" ] && ! git -c safe.directory="$APP_DIR" -C "$APP_DIR" remote get-url origin 2>/dev/null | grep -q "epfo-search"; then
     fail "$APP_DIR holds a different git repo"
 fi
-if [ -f "$SITE" ] && ! grep -q "epfo-search" "$SITE"; then fail "$SITE exists and is not this app"; fi
+# Site files from this script: current ones name epfo-search; the first
+# version only carried the "setup.sh replaces SERVER_NAME" comment.
+if [ -f "$SITE" ] && ! grep -qE "epfo-search|setup.sh replaces SERVER_NAME" "$SITE"; then
+    fail "$SITE exists and is not this app"
+fi
 if id "$APP_USER" >/dev/null 2>&1; then say "user $APP_USER: exists (reused)"; else say "user $APP_USER: will be created"; fi
 
 # Packages: install only what is missing, never upgrade
