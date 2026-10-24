@@ -5,7 +5,7 @@ history, and see them on a map. You type the EPFO captcha yourself; the app
 talks to the EPFO public portal for you.
 
 - `epfo_web.py` – the web app (search page, details, map)
-- `epfo_lookup.py` – EPFO portal client; also a terminal version (`python epfo_lookup.py`)
+- `epfo_lookup.py` – EPFO portal client; also a terminal version (`python epfo_lookup.py`, needs `pip install pillow` too)
 - `epfo_geocode.py` – turns addresses into map points with OpenStreetMap Nominatim (free, cached)
 - `deploy/` – files for running on a VPS
 - `.github/workflows/deploy.yml` – auto-deploy to the VPS on every push to `main`

@@ -9,13 +9,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Generous timeout/retries: some VPS links to PyPI are slow
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r requirements.txt
 
 COPY . .
 # Build the local place index into the image so the first map is instant,
 # then run as an unprivileged user that can still write the geocode cache.
 RUN python -c "import epfo_geocode; epfo_geocode._places('PUNE')" \
-    && useradd --system --uid 10001 epfo \
+    && useradd --system epfo \
     && chown -R epfo /app
 USER epfo
 

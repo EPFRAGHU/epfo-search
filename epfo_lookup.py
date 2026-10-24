@@ -7,6 +7,7 @@ you pick.
 
 Usage:  python epfo_lookup.py
 Needs:  pip install requests beautifulsoup4 pillow
+        (pillow only for this terminal version, to show the captcha image)
 """
 
 import io
@@ -17,7 +18,6 @@ import sys
 
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image
 
 BASE = "https://unifiedportal-emp.epfindia.gov.in"
 HOME = BASE + "/publicPortal/no-auth/misReport/home/loadEstSearchHome"
@@ -79,6 +79,7 @@ class EpfoClient:
         self.s.cookies.set("EMP", emp, domain="unifiedportal-emp.epfindia.gov.in", path="/")
 
     def show_captcha(self):
+        from PIL import Image  # only the terminal version needs pillow
         img = self.s.get(self.captcha_url, timeout=30).content
         Image.open(io.BytesIO(img)).show()
 
