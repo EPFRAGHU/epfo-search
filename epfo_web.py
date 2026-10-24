@@ -507,7 +507,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         state = self._session()
-        if self.path == "/":
+        # Links shared through chat apps often get "?..." appended
+        if self.path.split("?", 1)[0] in ("/", "/index.html"):
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         elif self.path in MAP_FILES:
             with open(MAP_FILES[self.path], "rb") as f:
