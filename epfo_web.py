@@ -57,8 +57,10 @@ PAGE = r"""<!doctype html>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2430; --muted:#5b6675; --line:#dde2e8; --accent:#1f5fbf; --err:#b42318; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --card:#1d2128; --text:#e6e9ee; --muted:#9aa4b2; --line:#2f3540; --accent:#6aa0ff; --err:#ff7b72; } }
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2430; --muted:#5b6675; --line:#dde2e8; --accent:#1f5fbf; --err:#b42318;
+          --paid-bg:#dcfce7; --paid-fg:#14532d; --paid-line:#86efac; --due-bg:#fee2e2; --due-fg:#7f1d1d; --due-line:#fca5a5; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --card:#1d2128; --text:#e6e9ee; --muted:#9aa4b2; --line:#2f3540; --accent:#6aa0ff; --err:#ff7b72;
+          --paid-bg:#123d24; --paid-fg:#bbf7d0; --paid-line:#1f6b3d; --due-bg:#45191b; --due-fg:#fecaca; --due-line:#7f2a2d; } }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, Segoe UI, sans-serif; }
   main { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
@@ -82,6 +84,26 @@ PAGE = r"""<!doctype html>
   #map { height:460px; border-radius:8px; border:1px solid var(--line); }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content { font-size:13px; line-height:1.45; color:#1c2430; }
+  /* Payment calendar: financial years as rows, March..February as columns */
+  .cal { border-collapse:separate; border-spacing:4px; width:auto; min-width:100%; }
+  .cal th, .cal td { border:0; padding:0; text-align:center; vertical-align:middle; background:none; }
+  .cal thead th { font-size:12px; color:var(--muted); font-weight:600; padding:2px 0; }
+  .cal th.fy { text-align:left; white-space:nowrap; padding-right:6px; font-size:13px; color:var(--text); }
+  .cal td.tot { white-space:nowrap; font-size:12px; color:var(--muted); padding-left:6px; text-align:right; }
+  .cal button { width:100%; min-width:62px; height:46px; border-radius:7px; padding:2px 3px; font:inherit; font-size:11.5px;
+                line-height:1.25; cursor:pointer; border:1px solid var(--line); background:var(--bg); color:var(--muted); }
+  .cal button.paid { background:var(--paid-bg); color:var(--paid-fg); border-color:var(--paid-line); font-weight:600; }
+  .cal button.due { background:var(--due-bg); color:var(--due-fg); border-color:var(--due-line); }
+  .cal button.sel { outline:2px solid var(--accent); outline-offset:1px; }
+  .cal button small { display:block; font-weight:400; opacity:.85; }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; font-size:12.5px; color:var(--muted); margin:6px 0 10px; }
+  .legend i { display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:-1px; margin-right:5px; border:1px solid var(--line); }
+  .legend .p { background:var(--paid-bg); border-color:var(--paid-line); } .legend .d { background:var(--due-bg); border-color:var(--due-line); }
+  .paydetail { margin-top:12px; }
+  .paydetail h3 { font-size:14px; margin:0 0 8px; }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; }
+  .tabs button { background:var(--bg); color:var(--text); border:1px solid var(--line); padding:5px 12px; font-weight:500; }
+  .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 </style></head>
 <body><main>
   <h1>EPFO Establishment Search</h1>
@@ -156,11 +178,118 @@ async function details(i){
   if (d.error) { $('details').innerHTML = '<div class="card msg">' + esc(d.error) + '</div>'; return; }
   $('details').innerHTML = d.sections.map(s => {
     const pay = s.title === 'Payment Details' && s.rows.length > 1;
-    const body = pay ? table(s.rows.slice(1), s.rows[0]) : table(s.rows);
-    const title = pay ? s.title + ' (' + (s.rows.length - 1) + ' payments)' : s.title;
-    return '<div class="card"><h2>' + esc(title) + '</h2>' + body + '</div>';
+    if (pay) return paymentCard(s.rows);
+    return '<div class="card"><h2>' + esc(s.title) + '</h2>' + table(s.rows) + '</div>';
   }).join('');
   $('details').scrollIntoView({behavior:'smooth'});
+}
+
+// ---- Payment calendar ----------------------------------------------------
+// One row per financial year (current year on top), one box per wage month
+// from March to February. Green = payment credited, red = no payment.
+const MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+const FY_MONTHS = [3,4,5,6,7,8,9,10,11,12,1,2];
+let payData = null;
+
+// "MAR-2024", "March 2024", "MAR-24", "15-MAR-2024 10:20", "03/2024", "032024", "2024-03", "15/03/2024"
+function parseMonth(v){
+  const s = String(v || '').toUpperCase().trim();
+  let m = s.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*[\s\-\/.,']*(\d{4}|\d{2})\b/);
+  if (m) return {y: m[2].length === 2 ? 2000 + +m[2] : +m[2], m: MON.indexOf(m[1]) + 1};
+  if ((m = s.match(/^(\d{1,2})[\-\/.](\d{1,2})[\-\/.](\d{4})/))) return ok(+m[3], +m[2]);
+  if ((m = s.match(/^(\d{4})[\-\/.](\d{1,2})/))) return ok(+m[1], +m[2]);
+  if ((m = s.match(/^(\d{1,2})[\-\/.](\d{4})$/))) return ok(+m[2], +m[1]);
+  if ((m = s.match(/^(\d{2})(\d{4})$/))) return ok(+m[2], +m[1]);
+  if ((m = s.match(/^(\d{4})(\d{2})$/))) return ok(+m[1], +m[2]);
+  return null;
+  function ok(y, mo){ return mo >= 1 && mo <= 12 && y > 1950 ? {y, m: mo} : null; }
+}
+const fyOf = p => p.m >= 3 ? p.y : p.y - 1;   // March starts the year
+const fyLabel = fy => fy + '-' + String((fy + 1) % 100).padStart(2, '0');
+const num = v => { const n = parseFloat(String(v || '').replace(/[^\d.\-]/g, '')); return isNaN(n) ? 0 : n; };
+function money(n){
+  if (n >= 1e7) return '₹' + (n / 1e7).toFixed(n >= 1e8 ? 0 : 1) + 'Cr';
+  if (n >= 1e5) return '₹' + (n / 1e5).toFixed(n >= 1e6 ? 0 : 1) + 'L';
+  if (n >= 1e3) return '₹' + (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'K';
+  return '₹' + Math.round(n);
+}
+const fullMoney = n => '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2});
+
+function paymentCard(rows){
+  const header = rows[0], body = rows.slice(1);
+  const col = (...words) => header.findIndex(h => words.some(w => h.toLowerCase().includes(w)));
+  const c = {wage: col('wage'), credit: col('credit', 'date'), amount: col('amount', 'amt'),
+             emp: col('employee', 'member', 'emp'), trrn: col('trrn'), ecr: col('ecr')};
+  const items = [];
+  for (const r of body) {
+    const when = parseMonth(r[c.wage]) || parseMonth(r[c.credit]);
+    if (when) items.push({when, row: r});
+  }
+  const tableView = table(body, header);
+  const title = 'Payment Details (' + body.length + ' payments)';
+  if (!items.length) return '<div class="card"><h2>' + esc(title) + '</h2>' + tableView + '</div>';
+
+  const byMonth = {};
+  for (const it of items) (byMonth[it.when.y * 100 + it.when.m] ||= []).push(it.row);
+  payData = {header, c, byMonth};
+
+  // Red only between the first paid month and last month: earlier months
+  // are before the establishment started paying; this month is not due yet.
+  const first = Math.min(...items.map(it => it.when.y * 100 + it.when.m));
+  const now = new Date(), lastDue = now.getMonth() === 0 ? (now.getFullYear() - 1) * 100 + 12 : now.getFullYear() * 100 + now.getMonth();
+  const curFy = fyOf({y: now.getFullYear(), m: now.getMonth() + 1});
+  const firstFy = fyOf({y: Math.floor(first / 100), m: first % 100});
+
+  let h = '<div class="wrap"><table class="cal"><thead><tr><th></th>'
+    + FY_MONTHS.map(m => '<th>' + MON[m - 1] + '</th>').join('') + '<th>Year total</th></tr></thead><tbody>';
+  for (let fy = curFy; fy >= firstFy; fy--) {
+    let total = 0, paidMonths = 0, dueMonths = 0;
+    h += '<tr><th class="fy">' + fyLabel(fy) + '</th>';
+    for (const m of FY_MONTHS) {
+      const y = m >= 3 ? fy : fy + 1, k = y * 100 + m, list = byMonth[k];
+      if (list) {
+        const amt = list.reduce((s, r) => s + num(r[c.amount]), 0);
+        const emp = c.emp >= 0 ? Math.max(...list.map(r => num(r[c.emp]))) : 0;
+        total += amt; paidMonths++; dueMonths++;
+        h += '<td><button class="paid" title="' + MON[m - 1] + ' ' + y + ': ' + fullMoney(amt) + '" onclick="showPay(' + k + ', this)">'
+          + money(amt) + (emp ? '<small>' + emp + ' emp</small>' : '') + (list.length > 1 ? '<small>' + list.length + ' credits</small>' : '') + '</button></td>';
+      } else if (k >= first && k <= lastDue) {
+        dueMonths++;
+        h += '<td><button class="due" title="' + MON[m - 1] + ' ' + y + ': no payment" onclick="showPay(' + k + ', this)">No<small>payment</small></button></td>';
+      } else {
+        h += '<td><button disabled title="' + MON[m - 1] + ' ' + y + '">–</button></td>';
+      }
+    }
+    h += '<td class="tot"><b>' + (total ? fullMoney(total) : '–') + '</b><br>' + paidMonths + '/' + dueMonths + ' months</td></tr>';
+  }
+  h += '</tbody></table></div>';
+
+  const legend = '<div class="legend"><span><i class="p"></i>Payment received</span><span><i class="d"></i>No payment</span>'
+    + '<span>Click a month for date of credit, amount, employees and TRRN. Months are wage months.</span></div>';
+  return '<div class="card"><h2>' + esc(title) + '</h2>'
+    + '<div class="tabs"><button class="on" onclick="payView(this, 0)">Year / month</button><button onclick="payView(this, 1)">Table</button></div>'
+    + '<div class="payview">' + legend + h + '<div class="paydetail" id="payDetail"></div></div>'
+    + '<div class="payview" hidden>' + tableView + '</div></div>';
+}
+
+function payView(btn, i){
+  const card = btn.closest('.card');
+  card.querySelectorAll('.tabs button').forEach((b, j) => b.classList.toggle('on', j === i));
+  card.querySelectorAll('.payview').forEach((v, j) => v.hidden = j !== i);
+}
+
+function showPay(k, btn){
+  document.querySelectorAll('.cal button.sel').forEach(b => b.classList.remove('sel'));
+  btn.classList.add('sel');
+  const y = Math.floor(k / 100), m = k % 100, label = MON[m - 1] + ' ' + y;
+  const list = payData.byMonth[k];
+  if (!list) { $('payDetail').innerHTML = '<h3>' + label + '</h3><p class="msg">No payment found for wage month ' + label + '.</p>'; return; }
+  const {header, c} = payData;
+  const want = [['Date of credit', c.credit], ['Amount', c.amount], ['No. of employees', c.emp], ['TRRN', c.trrn], ['ECR filed', c.ecr], ['Wage month', c.wage]]
+    .filter(([, i]) => i >= 0);
+  const total = list.reduce((s, r) => s + num(r[c.amount]), 0);
+  $('payDetail').innerHTML = '<h3>' + label + ' · ' + list.length + ' credit' + (list.length > 1 ? 's' : '') + ' · ' + fullMoney(total) + '</h3>'
+    + table(list.map(r => want.map(([n, i]) => n === 'Amount' ? fullMoney(num(r[i])) : r[i])), want.map(([n]) => n));
 }
 // Map: the server places every result in one request from its local list
 // of Indian places, so all pins appear together.
