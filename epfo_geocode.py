@@ -288,7 +288,8 @@ def pincode_point(pin):
 
 
 # Details labels -> field (first word found in the label wins)
-DETAIL_FIELDS = (("zone", "zone"), ("region", "region"), ("district", "district"), ("state", "state"))
+DETAIL_FIELDS = (("zone", "zone"), ("region", "region"), ("district", "district"), ("state", "state"),
+                 ("city", "city"), ("town", "city"))
 # A header cell next to another header cell is not a value: "District" | "State"
 LABEL_RE = re.compile(r"(state|zone|region|district|city|country|pin ?code|postal ?code|address( line)?)( name)?\s*\d*", re.I)
 
@@ -301,7 +302,7 @@ def address_from_details(sections):
     (["Pin Code", "682011"]) or a header row with values below it.
     Only cells labelled pin/address/postal are read for the pincode, so other
     six-digit numbers (codes, counts) are not mistaken for one."""
-    info = {"pin": None, "address": "", "state": "", "zone": "", "region": "", "district": ""}
+    info = {"pin": None, "address": "", "state": "", "zone": "", "region": "", "district": "", "city": ""}
 
     def take(label, value):
         label, value = label.lower(), (value or "").strip()
@@ -338,11 +339,13 @@ def remember_address(est_id, info):
 
 def known_address(est_id):
     """What was read earlier from this establishment's details: pin, address,
-    state, zone, region, district (state falls back to the pincode's)."""
+    state, zone, region, district, city. City, district and state the
+    details lack come from the pincode (post office, district, state)."""
     known = _addresses.get(est_id)
-    if known and not known.get("state") and known.get("pin"):
-        p = pincode_point(known["pin"])
-        known = {**known, "state": p[4] if p else ""}
+    p = pincode_point(known["pin"]) if known and known.get("pin") else None
+    if p:
+        known = {**known, "city": known.get("city") or p[2], "district": known.get("district") or p[3],
+                 "state": known.get("state") or p[4]}
     return known
 
 

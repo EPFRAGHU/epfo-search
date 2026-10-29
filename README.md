@@ -153,8 +153,10 @@ systemctl restart epfo-search       # restart
   list is placed in milliseconds. Pins are at the town/locality named in the
   address, or at the EPFO office city; "Open in Google Maps" in each pin
   searches the full address. Rebuild the list with `tools/build_places.py`.
-- Pincodes: when an establishment's EPFO details are read (View details, or
-  its "Show on map" button), its pincode and full address are kept in
+- Pincodes: after a search the page reads each establishment's EPFO
+  details in the background, one at a time (once per establishment; also on
+  View details / Show on map). Its pincode, full address, city, district,
+  state, zone and region are kept in
   `EPFO_DATA_DIR/est_addresses.json` and its pin moves to that pincode
   (`data/in_pincodes.tsv.gz`, GeoNames postal codes, median of each pincode's
   post offices; rebuild with `tools/build_pincodes.py`). Saved exact

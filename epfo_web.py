@@ -53,7 +53,19 @@ def details_info(known):
     """What the page shows from an establishment's EPFO details; "read"
     tells it whether they were read yet."""
     known = known or {}
-    return {k: known.get(k) or "" for k in ("pin", "state", "zone", "region", "district")} | {"read": bool(known.get("read"))}
+    return ({k: known.get(k) or "" for k in ("pin", "city", "district", "state", "zone", "region")}
+            | {"read": bool(known.get("read"))})
+
+
+def point_info(search, row):
+    """Map data of one result row: its pin, name, office, and what its EPFO
+    details said (pincode, city, district, state, zone, region)."""
+    est_id, name, address, office = row_fields(search, row)
+    known = known_address(est_id) or {}
+    full = known.get("address") or ", ".join(x for x in (address, office) if x)
+    return {"point": geocode(address, office, est_id), "est_id": est_id, "name": name,
+            "address": address, "office": office, **details_info(known),
+            "query": ", ".join(x for x in (name, full) if x)}
 
 
 def new_state():
@@ -114,7 +126,8 @@ PAGE = r"""<!doctype html>
   .st-label::before { display:none; }
   #map.far .st-label { display:none; }
   .est-label { font-size:11px; line-height:1.25; padding:2px 5px; text-align:center; font-weight:600; color:#1c2430;
-               background:rgba(255,255,255,.88); border:1px solid #b9c2cc; box-shadow:none; max-width:220px; white-space:normal; }
+               background:rgba(255,255,255,.88); border:1px solid #b9c2cc; box-shadow:none;
+               width:max-content; max-width:240px; white-space:normal; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
   tr.sel td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -383,6 +396,10 @@ async function googleView(){
   let markers = [], byIndex = {};
   return {
     clear(){ markers.forEach(m => m.setMap(null)); markers = []; byIndex = {}; info.close(); },
+    remove(i){
+      const e = byIndex[i]; if (!e) return;
+      e[0].setMap(null); markers = markers.filter(m => m !== e[0]); delete byIndex[i];
+    },
     add(lat, lng, color, html, i, tip){
       const m = new g.Marker({position: {lat, lng}, map, title: tip.join('\n'), icon: {path: g.SymbolPath.CIRCLE, scale: 8,
         fillColor: color, fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
@@ -422,8 +439,9 @@ async function indiaView(){
   let byIndex = {};
   return {
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
+    remove(i){ if (byIndex[i]) { pins.removeLayer(byIndex[i]); delete byIndex[i]; } },
     add(lat, lng, color, html, i, tip){
-      // Always-on label under the dot: name, then code (text nodes: no escaping needed)
+      // Always-on label under the dot, one line each (text nodes: no escaping needed)
       const label = document.createElement('div');
       tip.forEach((line, k) => { if (k) label.append(document.createElement('br')); label.append(line); });
       byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color, fillOpacity: .55})
@@ -435,7 +453,8 @@ async function indiaView(){
       map.setView(m.getLatLng(), Math.max(map.getZoom(), 7), {animate: false});
       m.openPopup();
     },
-    fit(){ if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]}); },
+    // extra room at the bottom for the labels under the dots
+    fit(){ if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, paddingTopLeft: [40, 30], paddingBottomRight: [40, 90]}); },
   };
 }
 
@@ -446,39 +465,86 @@ async function makeView(){
   return indiaView();
 }
 
-// Show one establishment on the map: zoom to its pin and open its popup.
-// The pincode in its EPFO details places it far better than the address
-// line, so when that is not known yet the server reads it first (once per
-// row) and the pins are redrawn.
 // searchId: the server's ID for the search these rows came from
 let lastPoints = [], lastResults = [], lastHeader = [], searchId = null;
 const pinTried = new Set();
+const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
+const PRECISION = {saved: 'Exact location (saved)', pincode: 'Pincode area, from EPFO details',
+                   locality: 'Approximate: town/locality from the address',
+                   office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 
 // Details not read yet for this row (and it has them)?
 const needsDetails = i => lastPoints[i] && !lastPoints[i].read && lastResults[i] && lastResults[i].has_details && !pinTried.has(i);
-// Clicking a dot reads its details once, then reopens it with state, zone, region
+// Clicking a dot whose details are not read yet reads them now
 function onPinOpen(i){ if (needsDetails(i)) showOnMap(i); }
+// "Ernakulam, Ernakulam, Kerala" -> "Ernakulam, Kerala"
+const uniq = list => [...new Map(list.filter(Boolean).map(s => [s.toLowerCase(), s])).values()];
 
+// Draw (or redraw) the dot of row i: colour, popup, and the label under it
+// with name, code, city/district/state and EPFO office.
+function drawPoint(i){
+  view.remove(i);
+  const g = lastPoints[i], p = g && g.point, x = lastResults[i];
+  if (!p) return;
+  const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
+  const facts = [['City', g.city], ['District', g.district], ['State', g.state], ['Zone', g.zone], ['Region', g.region]]
+    .filter(f => f[1]).map(f => f[0] + ': <b>' + esc(f[1]) + '</b>').join('<br>');
+  const html = '<div class="pop"><b>' + esc(g.name) + '</b>' + (g.office ? ' (' + esc(g.office) + ')' : '')
+    + '<br>' + esc(g.address) + '<br>' + esc(g.est_id)
+    + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading city, state, zone, region…</i>' : ''))
+    + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
+    + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
+    + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>';
+  view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c', html, i,
+           [g.name, g.est_id, uniq([g.city, g.district, g.state]).join(', '), g.office ? 'EPFO: ' + g.office : ''].filter(Boolean));
+}
+
+function mapSummary(){
+  const n = {saved: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
+  lastPoints.forEach(g => { const p = g.point; n[!p ? 'missed' : p.precision in COLOR ? p.precision : 'approx']++; });
+  return (n.saved ? n.saved + ' exact (green), ' : '') + (n.pincode ? n.pincode + ' by pincode (teal), ' : '')
+    + n.locality + ' at town/locality (blue), ' + n.approx + ' at EPFO office city (orange)'
+    + (n.missed ? ', ' + n.missed + ' not found' : '') + '. Click "📍 Show on map" in a row to find it on the map.';
+}
+
+// Read one row's EPFO details (pincode, city, district, state, zone, region;
+// the server keeps them for everyone) and redraw its dot.
+async function readDetails(i){
+  pinTried.add(i);
+  let d; try {
+    const res = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i, search: searchId})});
+    d = await res.json();
+  } catch (e) { d = {error: String(e)}; }
+  if (d.expired) { searchAgain(); return false; }
+  if (d.error) return true;          // skip this row, go on with the others
+  lastPoints[i] = d;
+  drawPoint(i);
+  return true;
+}
+
+// After a search: read the details of every row not read before, one at a
+// time, so every label fills in; stops when a newer search starts.
+async function readAll(run){
+  const todo = lastPoints.map((_, i) => i).filter(needsDetails);
+  for (let k = 0; k < todo.length; k++) {
+    if (run !== plotRun) return;
+    if (!needsDetails(todo[k])) continue;
+    $('mapStatus').textContent = 'Reading city, district and state from EPFO details: ' + (k + 1) + ' of ' + todo.length + '…';
+    if (!await readDetails(todo[k])) return;
+  }
+  if (run === plotRun) $('mapStatus').textContent = mapSummary();
+}
+
+// Show one establishment on the map: zoom to its pin and open its popup.
 async function showOnMap(i){
   document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
   if ($('row' + i)) $('row' + i).classList.add('sel');
   $('mapCard').hidden = false;
   $('map').scrollIntoView({behavior: 'smooth', block: 'center'});
-  if (needsDetails(i)) {
-    pinTried.add(i);
-    $('mapStatus').textContent = 'Reading pincode, state, zone and region from EPFO details…';
-    let d; try {
-      const res = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i, search: searchId})});
-      d = await res.json();
-    } catch (e) { d = {}; }
-    await plotResults(lastPlot);
-  }
+  if (needsDetails(i)) await readDetails(i);
   if (view && view.focus) view.focus(i);
 }
 
-const PRECISION = {saved: 'Exact location (saved)', pincode: 'Pincode area, from EPFO details',
-                   locality: 'Approximate: town/locality from the address',
-                   office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 async function plotResults(results){
   const run = ++plotRun;
   lastPlot = results;
@@ -493,29 +559,11 @@ async function plotResults(results){
   } catch (e) { d = {error: 'Request failed: ' + e}; }
   if (run !== plotRun) return;  // a newer search started
   if (d.error) { $('mapStatus').textContent = d.error; if (d.expired) searchAgain(); return; }
-  const n = {saved: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
-  const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
   lastPoints = d.points;
-  d.points.forEach((g, i) => {
-    const p = g.point, x = results[i];
-    if (!p) { n.missed++; return; }
-    n[p.precision in COLOR ? p.precision : 'approx']++;
-    const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
-    const facts = [['State', g.state], ['Zone', g.zone], ['Region', g.region]].filter(f => f[1])
-      .map(f => f[0] + ': <b>' + esc(f[1]) + '</b>').join('<br>');
-    view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c', '<div class="pop"><b>' + esc(g.name) + '</b>'
-        + (g.office ? ' (' + esc(g.office) + ')' : '') + '<br>' + esc(g.address) + '<br>' + esc(g.est_id)
-        + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading state, zone, region…</i>' : ''))
-        + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
-        + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
-        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i,
-        [g.name, g.est_id]);
-  });
+  lastPoints.forEach((_, i) => drawPoint(i));
   view.fit();
-  $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '')
-    + (n.pincode ? n.pincode + ' by pincode (teal), ' : '') + n.locality + ' at town/locality (blue), '
-    + n.approx + ' at EPFO office city (orange)' + (n.missed ? ', ' + n.missed + ' not found' : '')
-    + '. Click "📍 Show on map" in a row to find it on the map.';
+  $('mapStatus').textContent = mapSummary();
+  readAll(run);
 }
 newCaptcha();
 </script>
@@ -631,20 +679,11 @@ class Handler(BaseHTTPRequestHandler):
                         if info["pin"] and info["zone"] and info["region"]:
                             break
                     remember_address(est_id, {**info, "read": True})
-                    known = known_address(est_id)
-                return self._json(details_info(known))
+                # The row's map data again, now with its pincode pin and details
+                return self._json(point_info(s, r))
             if self.path == "/geocode":
                 # Every result at once
-                points = []
-                for r in s["results"]:
-                    est_id, name, address, office = row_fields(s, r)
-                    known = known_address(est_id) or {}
-                    full = known.get("address") or ", ".join(x for x in (address, office) if x)
-                    points.append({"point": geocode(address, office, est_id), "est_id": est_id,
-                                   "name": name, "address": address, "office": office,
-                                   **details_info(known),
-                                   "query": ", ".join(x for x in (name, full) if x)})
-                return self._json({"points": points})
+                return self._json({"points": [point_info(s, r) for r in s["results"]]})
         except (requests.RequestException, IndexError, KeyError, ValueError, TypeError) as e:
             return self._json({"error": f"Failed: {e}"})
         self._json({"error": "unknown path"}, 404)
