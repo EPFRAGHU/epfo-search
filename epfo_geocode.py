@@ -275,7 +275,7 @@ PIN_RE = re.compile(r"(?<!\d)([1-9]\d{2})\s?(\d{3})(?!\d)")
 
 
 def pincode_point(pin):
-    """(lat, lng, place, district) of an Indian pincode, or None."""
+    """(lat, lng, place, district, state) of an Indian pincode, or None."""
     global _pincodes
     if _pincodes is None:
         _pincodes = {}
@@ -283,28 +283,41 @@ def pincode_point(pin):
             with gzip.open(PINCODES_GZ, "rt", encoding="utf-8") as f:
                 for line in f:
                     c = line.rstrip("\n").split("\t")
-                    _pincodes[c[0]] = (float(c[1]), float(c[2]), c[3], c[4])
+                    _pincodes[c[0]] = (float(c[1]), float(c[2]), c[3], c[4], c[5] if len(c) > 5 else "")
     return _pincodes.get(pin)
 
 
+# Details labels -> field (first word found in the label wins)
+DETAIL_FIELDS = (("zone", "zone"), ("region", "region"), ("district", "district"), ("state", "state"))
+# A header cell next to another header cell is not a value: "District" | "State"
+LABEL_RE = re.compile(r"(state|zone|region|district|city|country|pin ?code|postal ?code|address( line)?)( name)?\s*\d*", re.I)
+
+
 def address_from_details(sections):
-    """Pincode and full address from EPFO 'View details' panels.
+    """Pincode, full address, state, zone, region and district from EPFO
+    'View details' panels, as a dict (missing ones are "" / None).
 
     Panels come as rows of cells, either label/value pairs
     (["Pin Code", "682011"]) or a header row with values below it.
-    Only cells labelled pin/address/postal are read, so other six-digit
-    numbers (codes, counts) are not mistaken for a pincode."""
-    pin, address = None, ""
+    Only cells labelled pin/address/postal are read for the pincode, so other
+    six-digit numbers (codes, counts) are not mistaken for one."""
+    info = {"pin": None, "address": "", "state": "", "zone": "", "region": "", "district": ""}
 
     def take(label, value):
-        nonlocal pin, address
-        label = label.lower()
-        if "address" in label and value and len(value) > len(address):
-            address = value
-        if any(w in label for w in ("pin", "postal", "address")) and not pin:
-            m = PIN_RE.search(value or "")
+        label, value = label.lower(), (value or "").strip()
+        if not value or value.lower() == label or LABEL_RE.fullmatch(value):
+            return
+        if "address" in label and len(value) > len(info["address"]):
+            info["address"] = value
+        if any(w in label for w in ("pin", "postal", "address")) and not info["pin"]:
+            m = PIN_RE.search(value)
             if m and pincode_point(m.group(1) + m.group(2)):
-                pin = m.group(1) + m.group(2)
+                info["pin"] = m.group(1) + m.group(2)
+        for word, field in DETAIL_FIELDS:
+            # "status" contains no "state"; short values only, not sentences
+            if word in label and not info[field] and len(value) <= 80 and not PIN_RE.fullmatch(value):
+                info[field] = value
+                break
 
     for _title, rows in sections:
         for r, row in enumerate(rows):
@@ -314,17 +327,23 @@ def address_from_details(sections):
             if nxt and len(nxt) == len(row):           # header row over a value row
                 for h, v in zip(row, nxt):
                     take(h, v)
-    return pin, address
+    return info
 
 
-def remember_address(est_id, pin, address):
-    if est_id and (pin or address):
-        _addresses.put(est_id, {"pin": pin, "address": address, "at": int(time.time())})
+def remember_address(est_id, info):
+    """Keep what the details said about this establishment, for everyone."""
+    if est_id and any(info.get(k) for k in ("pin", "address", "state", "zone", "region")):
+        _addresses.put(est_id, {**info, "at": int(time.time())})
 
 
 def known_address(est_id):
-    """{"pin", "address"} read earlier from this establishment's details."""
-    return _addresses.get(est_id)
+    """What was read earlier from this establishment's details: pin, address,
+    state, zone, region, district (state falls back to the pincode's)."""
+    known = _addresses.get(est_id)
+    if known and not known.get("state") and known.get("pin"):
+        p = pincode_point(known["pin"])
+        known = {**known, "state": p[4] if p else ""}
+    return known
 
 
 def geocode(address, office, est_id=""):

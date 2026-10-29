@@ -8,7 +8,7 @@ Usage:
     curl -o build/IN_postal.zip https://download.geonames.org/export/zip/IN.zip
     python tools/build_pincodes.py build/IN_postal.zip
 
-Output rows (tab separated): pincode, lat, lng, place name, district
+Output rows (tab separated): pincode, lat, lng, place name, district, state
 """
 
 import gzip
@@ -26,10 +26,10 @@ def main(zip_path):
     offices = defaultdict(list)
     with zipfile.ZipFile(zip_path) as z, z.open("IN.txt") as f:
         for line in io.TextIOWrapper(f, encoding="utf-8"):
-            # 1 pincode, 2 post office, 5 district, 9 lat, 10 lng
+            # 1 pincode, 2 post office, 3 state, 5 district, 9 lat, 10 lng
             c = line.rstrip("\n").split("\t")
             if c[9] and c[10]:
-                offices[c[1]].append((float(c[9]), float(c[10]), c[2], c[5]))
+                offices[c[1]].append((float(c[9]), float(c[10]), c[2], c[5], c[3]))
     with gzip.open(OUT, "wt", encoding="utf-8", compresslevel=9) as out:
         for pin in sorted(offices):
             rows = offices[pin]
@@ -38,7 +38,7 @@ def main(zip_path):
             # Name the pincode after its head/sub post office when it has one
             main_office = next((r for r in rows if r[2].endswith((" H.O", " S.O"))), rows[0])
             name = main_office[2].removesuffix(" H.O").removesuffix(" S.O")
-            out.write(f"{pin}\t{lat:.4f}\t{lng:.4f}\t{name}\t{main_office[3]}\n")
+            out.write(f"{pin}\t{lat:.4f}\t{lng:.4f}\t{name}\t{main_office[3]}\t{main_office[4]}\n")
     print(f"{len(offices)} pincodes -> {os.path.normpath(OUT)} ({os.path.getsize(OUT) // 1024} KB)")
 
 

@@ -49,6 +49,13 @@ def row_fields(search, row):
                                                ("address", 2), ("office name", 3))))
 
 
+def details_info(known):
+    """What the page shows from an establishment's EPFO details; "read"
+    tells it whether they were read yet."""
+    known = known or {}
+    return {k: known.get(k) or "" for k in ("pin", "state", "zone", "region", "district")} | {"read": bool(known.get("read"))}
+
+
 def new_state():
     # client: EPFO session of the latest captcha; searches: search id ->
     # {"results", "client", "header"}, oldest first
@@ -226,7 +233,7 @@ async function details(i){
   // when that moves its pin
   pinTried.add(i);
   const p = lastPoints[i] && lastPoints[i].point;
-  if (d.pin && p && !['saved', 'pincode'].includes(p.precision)) await plotResults(lastPlot);
+  if (lastPoints[i] && !lastPoints[i].read) await plotResults(lastPlot);  // shows the new state, zone, region
   $('details').scrollIntoView({behavior:'smooth'});
 }
 
@@ -377,7 +384,7 @@ async function googleView(){
     add(lat, lng, color, html, i){
       const m = new g.Marker({position: {lat, lng}, map, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
         fillColor: color, fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
-      m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); });
+      m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); onPinOpen(i); });
       markers.push(m); byIndex[i] = [m, html];
     },
     focus(i){
@@ -415,7 +422,7 @@ async function indiaView(){
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
     add(lat, lng, color, html, i){
       byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color, fillOpacity: .55})
-        .bindPopup(html).addTo(pins);
+        .bindPopup(html).on('popupopen', () => onPinOpen(i)).addTo(pins);
     },
     focus(i){
       const m = byIndex[i]; if (!m) return;
@@ -441,15 +448,19 @@ async function makeView(){
 let lastPoints = [], lastResults = [], lastHeader = [], searchId = null;
 const pinTried = new Set();
 
+// Details not read yet for this row (and it has them)?
+const needsDetails = i => lastPoints[i] && !lastPoints[i].read && lastResults[i] && lastResults[i].has_details && !pinTried.has(i);
+// Clicking a dot reads its details once, then reopens it with state, zone, region
+function onPinOpen(i){ if (needsDetails(i)) showOnMap(i); }
+
 async function showOnMap(i){
   document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
   if ($('row' + i)) $('row' + i).classList.add('sel');
   $('mapCard').hidden = false;
   $('map').scrollIntoView({behavior: 'smooth', block: 'center'});
-  const p = lastPoints[i] && lastPoints[i].point, r = lastResults[i];
-  if (p && !['saved', 'pincode'].includes(p.precision) && r && r.has_details && !pinTried.has(i)) {
+  if (needsDetails(i)) {
     pinTried.add(i);
-    $('mapStatus').textContent = 'Reading the pincode from EPFO details…';
+    $('mapStatus').textContent = 'Reading pincode, state, zone and region from EPFO details…';
     let d; try {
       const res = await fetch('/pincode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: i, search: searchId})});
       d = await res.json();
@@ -484,7 +495,11 @@ async function plotResults(results){
     if (!p) { n.missed++; return; }
     n[p.precision in COLOR ? p.precision : 'approx']++;
     const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
-    view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c','<div class="pop"><b>' + esc(g.name) + '</b><br>' + esc(g.address) + '<br>' + esc(g.est_id)
+    const facts = [['State', g.state], ['Zone', g.zone], ['Region', g.region]].filter(f => f[1])
+      .map(f => f[0] + ': <b>' + esc(f[1]) + '</b>').join('<br>');
+    view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c', '<div class="pop"><b>' + esc(g.name) + '</b>'
+        + (g.office ? ' (' + esc(g.office) + ')' : '') + '<br>' + esc(g.address) + '<br>' + esc(g.est_id)
+        + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading state, zone, region…</i>' : ''))
         + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
         + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
         + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i);
@@ -586,29 +601,31 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/details":
                 r = s["results"][int(body["index"])]
                 sections = s["client"].details(r["est_id"], r["urls"])
-                # Keep the pincode and full address for the map, for everyone
-                pin, full = address_from_details(sections)
-                remember_address(row_fields(s, r)[0], pin, full)
-                return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections], "pin": pin})
+                # Keep pincode, address, state, zone, region for the map, for everyone
+                info = address_from_details(sections)
+                remember_address(row_fields(s, r)[0], {**info, "read": True})
+                return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections], "pin": info["pin"]})
             if self.path == "/pincode":
-                # Pincode of one row without opening all its details: fetch
-                # its detail panels one at a time until one has the address.
+                # Pincode, state, zone and region of one row without opening
+                # all its details: fetch its detail panels one at a time
+                # until they are found (once per establishment, for everyone).
                 r = s["results"][int(body["index"])]
                 est_id = row_fields(s, r)[0]
                 known = known_address(est_id)
-                if not (known and known.get("pin")) and r.get("est_id") and r.get("urls"):
-                    c = s["client"]
+                if not (known and known.get("read")) and r.get("est_id") and r.get("urls"):
+                    c, panels, info = s["client"], [], {}
                     for url in r["urls"]:
                         if not url:
                             continue
                         resp = c._post(BASE + url, {"EstId": r["est_id"]})
                         resp.raise_for_status()
-                        pin, full = address_from_details([("", parse_tables(resp.text))])
-                        if pin:
-                            remember_address(est_id, pin, full)
+                        panels.append(("", parse_tables(resp.text)))
+                        info = address_from_details(panels)
+                        if info["pin"] and info["zone"] and info["region"]:
                             break
+                    remember_address(est_id, {**info, "read": True})
                     known = known_address(est_id)
-                return self._json({"pin": (known or {}).get("pin"), "address": (known or {}).get("address", "")})
+                return self._json(details_info(known))
             if self.path == "/geocode":
                 # Every result at once
                 points = []
@@ -617,7 +634,8 @@ class Handler(BaseHTTPRequestHandler):
                     known = known_address(est_id) or {}
                     full = known.get("address") or ", ".join(x for x in (address, office) if x)
                     points.append({"point": geocode(address, office, est_id), "est_id": est_id,
-                                   "name": name, "address": address, "pin": known.get("pin"),
+                                   "name": name, "address": address, "office": office,
+                                   **details_info(known),
                                    "query": ", ".join(x for x in (name, full) if x)})
                 return self._json({"points": points})
         except (requests.RequestException, IndexError, KeyError, ValueError, TypeError) as e:
