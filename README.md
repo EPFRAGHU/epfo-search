@@ -142,6 +142,17 @@ systemctl restart epfo-search       # restart
   draws India's official boundary. In Google Cloud enable "Maps JavaScript API"
   and restrict the key to `https://search.epf-dashboard.online/*`. Without a
   key, or if Google rejects it, the map below is used.
+- Base maps (switch at the map's top right): **Streets** (OpenStreetMap),
+  **Terrain** (OpenTopoMap), **Satellite** (Esri World Imagery), **Plain**. All
+  free, no key. These world maps draw the Line of Control as a border, so
+  outside India is masked, and the parts of J&K and Ladakh they show as another
+  country are painted over (`data/india_cover.geojson`: official J&K + Ladakh
+  minus OpenStreetMap's J&K and Ladakh = PoK, Gilgit-Baltistan, Aksai Chin,
+  Shaksgam). Rebuild: get both OSM boundaries from Nominatim
+  (`polygon_geojson=1`), then `mapshaper india_states.geojson -filter
+  "/jammu|ladakh/i.test(name)" -dissolve -erase osm_jkl.geojson -explode
+  -filter "this.area > 1e9"`. OpenStreetMap's tile servers are for light
+  use; for heavy use switch to a paid tile provider.
 - The map shows India only, drawn from India's official boundary and states
   (Survey of India map via [DataMeet](https://github.com/datameet/maps), CC BY 4.0:
   `data/india_states.geojson`, `data/india_outline.geojson`). Jammu & Kashmir

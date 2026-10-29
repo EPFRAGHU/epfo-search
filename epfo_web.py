@@ -28,7 +28,7 @@ GMAPS_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
 PORT = int(os.environ.get("EPFO_PORT", "8765"))
 # India's official boundary and states (Survey of India via DataMeet, CC BY 4.0)
 MAP_FILES = {f"/map/{n}": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", n)
-             for n in ("india_states.geojson", "india_outline.geojson")}
+             for n in ("india_states.geojson", "india_outline.geojson", "india_cover.geojson")}
 SESSION_TTL = 30 * 60  # seconds a visitor's search stays usable while idle
 MAX_SESSIONS = 1000
 MAX_SEARCHES = 5  # recent searches kept per visitor (one per open tab, roughly)
@@ -123,6 +123,8 @@ PAGE = r"""<!doctype html>
   h2 { font-size:16px; margin:0 0 10px; }
   #map { height:520px; border-radius:8px; border:1px solid var(--line); background:var(--map-sea); }
   .st-label { background:none; border:0; box-shadow:none; color:var(--muted); font-size:11px; font-weight:600; padding:0; }
+  /* state names over a street/satellite map: dark text with a light halo */
+  #map:not(.plain) .st-label { color:#3b4452; text-shadow:0 0 3px #fff, 0 0 3px #fff; }
   .st-label::before { display:none; }
   #map.far .st-label { display:none; }
   .est-label { font-size:11px; line-height:1.25; padding:2px 5px; text-align:center; font-weight:600; color:#1c2430;
@@ -422,22 +424,56 @@ async function googleView(){
 
 async function indiaView(){
   const css = getComputedStyle(document.documentElement), v = n => css.getPropertyValue(n).trim();
-  const map = L.map('map', {zoomSnap: 0.25, minZoom: 4, maxZoom: 12, maxBounds: [[2, 60], [42, 104]], maxBoundsViscosity: 0.8,
+  const map = L.map('map', {zoomSnap: 0.25, minZoom: 4, maxZoom: 18, maxBounds: [[2, 60], [42, 104]], maxBoundsViscosity: 0.8,
                       attributionControl: true}).fitBounds([[6.5, 68], [37.2, 97.5]]);
   map.attributionControl.setPrefix('').addAttribution(
     'India boundary: Survey of India via <a href="https://github.com/datameet/maps" target="_blank" rel="noopener">DataMeet</a> (CC BY 4.0) · Places © GeoNames');
-  const [states, outline] = await Promise.all(['/map/india_states.geojson', '/map/india_outline.geojson']
+  const [states, outline, cover] = await Promise.all(['/map/india_states.geojson', '/map/india_outline.geojson', '/map/india_cover.geojson']
     .map(u => fetch(u).then(r => r.json())));
-  L.geoJSON(states, {
-    style: {color: v('--map-state'), weight: 0.8, fillColor: v('--map-land'), fillOpacity: 1},
+
+  // Street, terrain and satellite maps (free, no key) come from world map
+  // services that draw the Line of Control as a border. So on top of them:
+  // everything outside India's official boundary is masked, the parts of
+  // J&K and Ladakh those maps show as another country (PoK,
+  // Gilgit-Baltistan, Aksai Chin, Shaksgam; data/india_cover.geojson) are
+  // painted over, and the official outline and state lines are drawn last.
+  const osm = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
+  const bases = {
+    'Streets': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 18, attribution: osm}),
+    'Terrain': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+      {maxZoom: 17, attribution: osm + ', SRTM | &copy; <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a> (CC-BY-SA)'}),
+    'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {maxZoom: 18, attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'}),
+    'Plain': L.layerGroup(),
+  };
+  bases['Streets'].addTo(map);
+  L.control.layers(bases, null, {position: 'topright'}).addTo(map);
+
+  map.createPane('cover').style.zIndex = 350;   // above the tiles, below lines and dots
+  const outerRings = g => (g.type === 'Polygon' ? [g.coordinates] : g.coordinates).map(p => p[0].map(([x, y]) => [y, x]));
+  const holes = (outline.geometries || outline.features.map(f => f.geometry)).flatMap(outerRings);
+  const world = [[-89, -179], [-89, 179], [89, 179], [89, -179]];
+  const mask = L.polygon([world, ...holes], {pane: 'cover', stroke: false, fillColor: v('--map-sea'), fillOpacity: 1, interactive: false}).addTo(map);
+  const covered = L.geoJSON(cover, {pane: 'cover', interactive: false}).addTo(map);
+  const stateLayer = L.geoJSON(states, {
     onEachFeature: (f, layer) => layer.bindTooltip(f.properties.name, {permanent: true, direction: 'center', className: 'st-label'}),
   }).addTo(map);
   L.geoJSON(outline, {style: {color: v('--map-border'), weight: 1.6, fill: false}, interactive: false}).addTo(map);
+  // Plain: the official map alone. With a base map: states see-through, the
+  // covered areas in a light land colour, thick enough to hide the LoC line.
+  const restyle = plain => {
+    stateLayer.setStyle({color: plain ? v('--map-state') : '#8a94a3', weight: plain ? 0.8 : 1, fillColor: v('--map-land'), fillOpacity: plain ? 1 : 0});
+    covered.setStyle({fillColor: plain ? v('--map-land') : '#efece6', fillOpacity: 1, color: plain ? v('--map-land') : '#efece6', weight: plain ? 0 : 6});
+    $('map').classList.toggle('plain', plain);
+  };
+  restyle(false);
+  map.on('baselayerchange', e => restyle(e.name === 'Plain'));
   const far = () => $('map').classList.toggle('far', map.getZoom() < 5.5);
   map.on('zoomend', far); far();
   const pins = L.featureGroup().addTo(map);
   let byIndex = {};
   return {
+    map,
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
     remove(i){ if (byIndex[i]) { pins.removeLayer(byIndex[i]); delete byIndex[i]; } },
     add(lat, lng, color, html, i, tip){
