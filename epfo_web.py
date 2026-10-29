@@ -113,6 +113,8 @@ PAGE = r"""<!doctype html>
   .st-label { background:none; border:0; box-shadow:none; color:var(--muted); font-size:11px; font-weight:600; padding:0; }
   .st-label::before { display:none; }
   #map.far .st-label { display:none; }
+  .est-label { font-size:11px; line-height:1.25; padding:2px 5px; text-align:center; font-weight:600; color:#1c2430;
+               background:rgba(255,255,255,.88); border:1px solid #b9c2cc; box-shadow:none; max-width:220px; white-space:normal; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
   tr.sel td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -382,7 +384,7 @@ async function googleView(){
   return {
     clear(){ markers.forEach(m => m.setMap(null)); markers = []; byIndex = {}; info.close(); },
     add(lat, lng, color, html, i, tip){
-      const m = new g.Marker({position: {lat, lng}, map, title: tip, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
+      const m = new g.Marker({position: {lat, lng}, map, title: tip.join('\n'), icon: {path: g.SymbolPath.CIRCLE, scale: 8,
         fillColor: color, fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
       m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); onPinOpen(i); });
       markers.push(m); byIndex[i] = [m, html];
@@ -421,9 +423,11 @@ async function indiaView(){
   return {
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
     add(lat, lng, color, html, i, tip){
-      // bindTooltip shows text, not HTML, so names need no escaping here
+      // Always-on label under the dot: name, then code (text nodes: no escaping needed)
+      const label = document.createElement('div');
+      tip.forEach((line, k) => { if (k) label.append(document.createElement('br')); label.append(line); });
       byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color, fillOpacity: .55})
-        .bindPopup(html).bindTooltip(document.createTextNode(tip), {direction: 'top', offset: [0, -6]})
+        .bindPopup(html).bindTooltip(label, {permanent: true, direction: 'bottom', offset: [0, 6], className: 'est-label'})
         .on('popupopen', () => onPinOpen(i)).addTo(pins);
     },
     focus(i){
@@ -505,7 +509,7 @@ async function plotResults(results){
         + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
         + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
         + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i,
-        g.name + ' · ' + g.est_id);
+        [g.name, g.est_id]);
   });
   view.fit();
   $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '')
