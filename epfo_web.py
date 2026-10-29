@@ -381,8 +381,8 @@ async function googleView(){
   let markers = [], byIndex = {};
   return {
     clear(){ markers.forEach(m => m.setMap(null)); markers = []; byIndex = {}; info.close(); },
-    add(lat, lng, color, html, i){
-      const m = new g.Marker({position: {lat, lng}, map, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
+    add(lat, lng, color, html, i, tip){
+      const m = new g.Marker({position: {lat, lng}, map, title: tip, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
         fillColor: color, fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
       m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); onPinOpen(i); });
       markers.push(m); byIndex[i] = [m, html];
@@ -420,9 +420,11 @@ async function indiaView(){
   let byIndex = {};
   return {
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
-    add(lat, lng, color, html, i){
+    add(lat, lng, color, html, i, tip){
+      // bindTooltip shows text, not HTML, so names need no escaping here
       byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color, fillOpacity: .55})
-        .bindPopup(html).on('popupopen', () => onPinOpen(i)).addTo(pins);
+        .bindPopup(html).bindTooltip(document.createTextNode(tip), {direction: 'top', offset: [0, -6]})
+        .on('popupopen', () => onPinOpen(i)).addTo(pins);
     },
     focus(i){
       const m = byIndex[i]; if (!m) return;
@@ -502,7 +504,8 @@ async function plotResults(results){
         + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading state, zone, region…</i>' : ''))
         + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
         + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
-        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i);
+        + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>', i,
+        g.name + ' · ' + g.est_id);
   });
   view.fit();
   $('mapStatus').textContent = (n.saved ? n.saved + ' exact (green), ' : '')
