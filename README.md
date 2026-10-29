@@ -142,6 +142,12 @@ systemctl restart epfo-search       # restart
   draws India's official boundary. In Google Cloud enable "Maps JavaScript API"
   and restrict the key to `https://search.epf-dashboard.online/*`. Without a
   key, or if Google rejects it, the map below is used.
+- Exact locations: a dot's popup has "Find on Google Maps" and "Set location
+  from Google Maps". Paste the place's coordinates or its Google Maps link (short
+  `maps.app.goo.gl` share links are followed by the server, only that host); it
+  is saved for everyone in `EPFO_DATA_DIR/saved_locations.json`. Placing dots
+  automatically where Google has them would need Google's paid Geocoding/Places
+  API.
 - Base maps (switch at the map's top right): **Streets** (OpenStreetMap),
   **Terrain** (OpenTopoMap), **Satellite** (Esri World Imagery), **Plain**. All
   free, no key. These world maps draw the Line of Control as a border, so

@@ -20,7 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import address_from_details, geocode, known_address, remember_address
+from epfo_geocode import (address_from_details, coords_from_text, geocode, known_address, remember_address,
+                          save_location)
 from epfo_lookup import BASE, EpfoClient, parse_tables
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
@@ -408,9 +409,9 @@ async function googleView(){
       m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); onPinOpen(i); });
       markers.push(m); byIndex[i] = [m, html];
     },
-    focus(i){
+    focus(i, zoom = 8){
       const e = byIndex[i]; if (!e) return;
-      map.setCenter(e[0].getPosition()); map.setZoom(Math.max(map.getZoom(), 8));
+      map.setCenter(e[0].getPosition()); map.setZoom(Math.max(map.getZoom(), zoom));
       info.setContent(e[1]); info.open({map, anchor: e[0]});
     },
     fit(){
@@ -484,9 +485,9 @@ async function indiaView(){
         .bindPopup(html).bindTooltip(label, {permanent: true, direction: 'bottom', offset: [0, 6], className: 'est-label'})
         .on('popupopen', () => onPinOpen(i)).addTo(pins);
     },
-    focus(i){
+    focus(i, zoom = 7){
       const m = byIndex[i]; if (!m) return;
-      map.setView(m.getLatLng(), Math.max(map.getZoom(), 7), {animate: false});
+      map.setView(m.getLatLng(), Math.max(map.getZoom(), zoom), {animate: false});
       m.openPopup();
     },
     // extra room at the bottom for the labels under the dots
@@ -505,7 +506,7 @@ async function makeView(){
 let lastPoints = [], lastResults = [], lastHeader = [], searchId = null;
 const pinTried = new Set();
 const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
-const PRECISION = {saved: 'Exact location (saved)', pincode: 'Pincode area, from EPFO details',
+const PRECISION = {saved: 'Exact location, from Google Maps', pincode: 'Pincode area, from EPFO details',
                    locality: 'Approximate: town/locality from the address',
                    office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 
@@ -529,8 +530,10 @@ function drawPoint(i){
     + '<br>' + esc(g.address) + '<br>' + esc(g.est_id)
     + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading city, state, zone, region…</i>' : ''))
     + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
-    + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Open in Google Maps</a>'
-    + (x && x.has_details ? ' · <a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>';
+    + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Find on Google Maps</a>'
+    + ' · <a href="#" onclick="setLocation(' + i + ');return false">' + (p.precision === 'saved' ? 'Change location' : '<b>Set location from Google Maps</b>') + '</a>'
+    + (p.precision === 'saved' ? ' · <a href="#" onclick="setLocation(' + i + ', true);return false">Remove</a>' : '')
+    + (x && x.has_details ? '<br><a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>';
   view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c', html, i,
            [g.name, g.est_id, uniq([g.city, g.district, g.state]).join(', '), g.office ? 'EPFO: ' + g.office : ''].filter(Boolean));
 }
@@ -569,6 +572,29 @@ async function readAll(run){
     if (!await readDetails(todo[k])) return;
   }
   if (run === plotRun) $('mapStatus').textContent = mapSummary();
+}
+
+// Put a dot exactly where Google Maps has the place: the user pastes its
+// coordinates or Share link; the server saves it for everyone.
+async function setLocation(i, clear){
+  let text = '';
+  if (!clear) {
+    text = prompt('Find this establishment with "Find on Google Maps", then paste here either:\n'
+      + '• its coordinates (right-click the place in Google Maps and click the numbers), or\n'
+      + '• its Share link (also short maps.app.goo.gl links).');
+    if (!text || !text.trim()) return;
+  } else if (!confirm('Remove the saved location of this establishment?')) return;
+  let d; try {
+    const res = await fetch('/location', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({index: i, search: searchId, text, clear: !!clear})});
+    d = await res.json();
+  } catch (e) { d = {error: String(e)}; }
+  if (d.expired) return searchAgain();
+  if (d.error) return alert(d.error);
+  lastPoints[i] = d;
+  drawPoint(i);
+  $('mapStatus').textContent = mapSummary();
+  view.focus(i, clear ? 7 : 16);
 }
 
 // Show one establishment on the map: zoom to its pin and open its popup.
@@ -716,6 +742,24 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     remember_address(est_id, {**info, "read": True})
                 # The row's map data again, now with its pincode pin and details
+                return self._json(point_info(s, r))
+            if self.path == "/location":
+                # Exact spot from Google Maps (pasted coordinates or a Maps
+                # link), saved for everyone; clear=true removes it. The
+                # establishment comes from this visitor's own search.
+                r = s["results"][int(body["index"])]
+                est_id = row_fields(s, r)[0]
+                if not est_id:
+                    return self._json({"error": "This row has no establishment ID."})
+                try:
+                    if body.get("clear"):
+                        save_location(est_id, None, None)
+                    else:
+                        save_location(est_id, *coords_from_text(body.get("text", "")))
+                except ValueError as e:
+                    return self._json({"error": str(e)})
+                except OSError as e:
+                    return self._json({"error": f"Could not save on the server: {e.strerror}"})
                 return self._json(point_info(s, r))
             if self.path == "/geocode":
                 # Every result at once

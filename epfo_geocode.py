@@ -267,6 +267,37 @@ def save_location(est_id, lat, lng):
         _saved.put(est_id, None)
 
 
+# Short Google Maps share links are followed (only these hosts) to the full
+# URL, which carries the coordinates.
+SHORT_LINK_HOSTS = ("maps.app.goo.gl", "goo.gl")
+_COORD_PATTERNS = (
+    re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)"),                                   # the place's own point
+    re.compile(r"[?&](?:q|query|ll|center|destination)=(-?\d+\.\d+),\s*(-?\d+\.\d+)"),
+    re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)"),                                       # where the map was centred
+    re.compile(r"^\(?\s*(-?\d{1,2}\.\d+)\s*[,\s]\s*(-?\d{2,3}\.\d+)\s*\)?$"),        # "9.93812, 76.26213"
+)
+
+
+def coords_from_text(text):
+    """(lat, lng) from pasted coordinates or a Google Maps link, else None.
+    Short share links are opened to read the coordinates from where they lead.
+    Raises ValueError with a message for the user."""
+    text = requests.utils.unquote((text or "").strip())
+    host = re.match(r"https?://([^/?#]+)", text)
+    if host and host.group(1).lower() in SHORT_LINK_HOSTS:
+        try:
+            r = requests.get(text, timeout=15, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        except requests.RequestException:
+            raise ValueError("Could not open that short link. Paste the coordinates instead.")
+        text = requests.utils.unquote(r.url) + " " + r.text[:200000]
+    for pattern in _COORD_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+    raise ValueError("No coordinates found. In Google Maps right-click the place and click the numbers "
+                     "(copies them, e.g. 9.97612, 76.28173), or paste its Share link.")
+
+
 # ---- pincodes -------------------------------------------------------------
 
 PINCODES_GZ = os.path.join(HERE, "data", "in_pincodes.tsv.gz")
