@@ -178,5 +178,11 @@ systemctl restart epfo-search       # restart
   (`data/in_pincodes.tsv.gz`, GeoNames postal codes, median of each pincode's
   post offices; rebuild with `tools/build_pincodes.py`). Saved exact
   locations still come first.
+- Address places: in the same background pass, place names and landmarks
+  from the address (e.g. "KIIT CAMPUS") are looked up once on OpenStreetMap
+  near the EPFO office (and inside a town already found in the address); a
+  match moves the dot there (purple). Pincode points are used only when they
+  are real (many GeoNames pincodes share a district placeholder point) and
+  within 25 km of the office.
 - Only office cities missing from that list are looked up online (OpenStreetMap
   Nominatim, one request per second, cached in `geocode_cache.json`).

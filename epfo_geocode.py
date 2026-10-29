@@ -8,7 +8,10 @@ online service. On first use the list is turned into a small SQLite index
 EPFO addresses are often incomplete (no pincode, lines glued together such
 as 'M.G.ROADERNAKULAM'), so each lookup tries, in order:
   0. an exact location someone saved for this establishment -> "saved"
-     the pincode from its EPFO details (once anyone opened them) -> "pincode"
+     a place/landmark from its address found on OpenStreetMap near the
+     EPFO office (looked up once in the background)  -> "street"
+     the pincode from its EPFO details, if that point is real and near
+     the office                                      -> "pincode"
   1. a town or locality named in the address, near the EPFO office
                                                   -> precision "locality"
   2. the EPFO office city                         -> precision "office"
@@ -32,10 +35,10 @@ import requests
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLACES_GZ = os.path.join(HERE, "data", "in_places.tsv.gz")
 PLACES_DB = os.path.join(HERE, "data", "in_places.sqlite")
-CACHE_PATH = os.path.join(HERE, "geocode_cache.json")
-# Exact locations people set for establishments. EPFO_DATA_DIR should be a
-# persistent folder (a Docker volume), so they survive redeploys.
+# Saved locations, details read from EPFO and online lookups. EPFO_DATA_DIR
+# should be a persistent folder (a Docker volume), so they survive redeploys.
 DATA_DIR = os.environ.get("EPFO_DATA_DIR") or HERE
+CACHE_PATH = os.path.join(DATA_DIR, "geocode_cache.json")
 SAVED_PATH = os.path.join(DATA_DIR, "saved_locations.json")
 INDIA_BOX = (6.0, 38.0, 68.0, 98.0)  # lat min/max, lng min/max: saved points must be inside
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
@@ -126,6 +129,7 @@ def _load_cache():
 
 
 def _save_cache():
+    os.makedirs(DATA_DIR, exist_ok=True)
     tmp = CACHE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(_cache, f, ensure_ascii=False, indent=0)
@@ -306,7 +310,9 @@ PIN_RE = re.compile(r"(?<!\d)([1-9]\d{2})\s?(\d{3})(?!\d)")
 
 
 def pincode_point(pin):
-    """(lat, lng, place, district, state) of an Indian pincode, or None."""
+    """(lat, lng, place, district, state, point_reliable) of an Indian pincode,
+    or None. Many pincodes only have a district placeholder point
+    (point_reliable False); their names are still right."""
     global _pincodes
     if _pincodes is None:
         _pincodes = {}
@@ -314,7 +320,8 @@ def pincode_point(pin):
             with gzip.open(PINCODES_GZ, "rt", encoding="utf-8") as f:
                 for line in f:
                     c = line.rstrip("\n").split("\t")
-                    _pincodes[c[0]] = (float(c[1]), float(c[2]), c[3], c[4], c[5] if len(c) > 5 else "")
+                    _pincodes[c[0]] = (float(c[1]), float(c[2]), c[3], c[4], c[5] if len(c) > 5 else "",
+                                       len(c) > 6 and c[6] == "1")
     return _pincodes.get(pin)
 
 
@@ -365,7 +372,7 @@ def address_from_details(sections):
 def remember_address(est_id, info):
     """Keep what the details said about this establishment, for everyone."""
     if est_id and any(info.get(k) for k in ("pin", "address", "state", "zone", "region")):
-        _addresses.put(est_id, {**info, "at": int(time.time())})
+        _addresses.put(est_id, {**(_addresses.get(est_id) or {}), **info, "at": int(time.time())})
 
 
 def known_address(est_id):
@@ -380,17 +387,71 @@ def known_address(est_id):
     return known
 
 
+MAX_KM_PINCODE = 25  # pincode points farther than this from the EPFO office are distrusted
+MAX_KM_STREET = 40   # online address matches farther than this from the office are wrong
+MAX_KM_IN_TOWN = 15  # ... or farther than this from a town already found in the address
+STREET_QUERIES = 4   # online lookups per establishment, at most (one per second)
+
+
+def _street_queries(address):
+    """Address parts worth asking OpenStreetMap about: whole parts first
+    (street names: 'LATOUCHE ROAD'), then their distinctive single words
+    ('384/2165KIIT CAMPUS, PATIA' -> ['KIIT CAMPUS', 'KIIT', 'PATIA'])."""
+    phrases, words = [], []
+    for part in re.split(r"[,;]", address):
+        all_words = [w for w in re.split(r"[^A-Za-z]+", part.upper()) if len(w) >= 3]
+        named = [w for w in all_words if w not in NOT_PLACES]
+        if len(all_words) > 1 and named:
+            phrases.append(" ".join(all_words))
+        words += named
+    seen = set()
+    return [q for q in phrases + words if not (q in seen or seen.add(q))][:STREET_QUERIES]
+
+
+def street_point(address, office):
+    """Where OpenStreetMap puts a place or landmark named in the address
+    (e.g. 'KIIT' -> the KIIT campus), searched near the EPFO office city.
+    Slow (online, one query per second, cached); call in the background."""
+    office, address = _clean(office), _clean(address)
+    near = _office_point(office) if office else None
+    if not near:
+        return None
+    # A town already found in the address locally (e.g. Ropar) is trusted
+    # more than an online name match elsewhere: the online point must lie in
+    # that town. Without one, it must lie near the EPFO office.
+    town = _locality(address, near)
+    anchor, limit = (town, MAX_KM_IN_TOWN) if town else (near, MAX_KM_STREET)
+    for q in _street_queries(address):
+        point = _nominatim(f"{q}, {office}, India")
+        if point and _km(point, anchor) <= limit:
+            return {"lat": point[0], "lng": point[1], "q": q}
+    return None
+
+
+def refine_location(est_id, address, office):
+    """Look the establishment up online once and keep the answer (or that
+    there was none) with its other details, for everyone."""
+    known = _addresses.get(est_id) or {}
+    if est_id and "osm" not in known:
+        _addresses.put(est_id, {**known, "osm": street_point(known.get("address") or address, office)})
+
+
 def geocode(address, office, est_id=""):
     """Return {"lat", "lng", "precision"} or None if nothing matched."""
     s = _saved.get(est_id)
     if s:
         return {"lat": s["lat"], "lng": s["lng"], "precision": "saved"}
-    known = _addresses.get(est_id)
-    p = pincode_point(known["pin"]) if known and known.get("pin") else None
-    if p:
-        return {"lat": p[0], "lng": p[1], "precision": "pincode", "pin": known["pin"]}
+    known = _addresses.get(est_id) or {}
+    if known.get("osm"):
+        o = known["osm"]
+        return {"lat": o["lat"], "lng": o["lng"], "precision": "street", "q": o["q"]}
     address, office = _clean(address), _clean(office)
     near = _office_point(office) if office else None
+    p = pincode_point(known["pin"]) if known.get("pin") else None
+    # Pincode points are often estimates; use one only when it is real and
+    # near the EPFO office.
+    if p and p[5] and (not near or _km(p, near) <= MAX_KM_PINCODE):
+        return {"lat": p[0], "lng": p[1], "precision": "pincode", "pin": known["pin"]}
     point = _locality(address, near) if address else None
     if point:
         return {"lat": point[0], "lng": point[1], "precision": "locality"}

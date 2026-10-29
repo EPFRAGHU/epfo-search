@@ -20,8 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import (address_from_details, coords_from_text, geocode, known_address, remember_address,
-                          save_location)
+from epfo_geocode import (address_from_details, coords_from_text, geocode, known_address, refine_location,
+                          remember_address, save_location)
 from epfo_lookup import BASE, EpfoClient, parse_tables
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
@@ -52,10 +52,11 @@ def row_fields(search, row):
 
 def details_info(known):
     """What the page shows from an establishment's EPFO details; "read"
-    tells it whether they were read yet."""
+    tells it whether they were read and looked up online yet (rows read
+    before the online lookup existed get one more pass)."""
     known = known or {}
     return ({k: known.get(k) or "" for k in ("pin", "city", "district", "state", "zone", "region")}
-            | {"read": bool(known.get("read"))})
+            | {"read": bool(known.get("read")) and "osm" in known})
 
 
 def point_info(search, row):
@@ -505,8 +506,9 @@ async function makeView(){
 // searchId: the server's ID for the search these rows came from
 let lastPoints = [], lastResults = [], lastHeader = [], searchId = null;
 const pinTried = new Set();
-const COLOR = {saved: '#15803d', pincode: '#0e7490', locality: '#1f5fbf'};
-const PRECISION = {saved: 'Exact location, from Google Maps', pincode: 'Pincode area, from EPFO details',
+const COLOR = {saved: '#15803d', street: '#7c3aed', pincode: '#0e7490', locality: '#1f5fbf'};
+const PRECISION = {saved: 'Exact location, from Google Maps', street: 'Place in the address, found on OpenStreetMap',
+                   pincode: 'Pincode area, from EPFO details',
                    locality: 'Approximate: town/locality from the address',
                    office: 'Approximate: EPFO office city', state: 'Rough: state only'};
 
@@ -529,7 +531,8 @@ function drawPoint(i){
   const html = '<div class="pop"><b>' + esc(g.name) + '</b>' + (g.office ? ' (' + esc(g.office) + ')' : '')
     + '<br>' + esc(g.address) + '<br>' + esc(g.est_id)
     + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading city, state, zone, region…</i>' : ''))
-    + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details' : PRECISION[p.precision]) + '</i>'
+    + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details'
+                      : p.precision === 'street' ? '"' + p.q + '" from the address, found on OpenStreetMap' : PRECISION[p.precision]) + '</i>'
     + '<br><a href="' + gmaps + '" target="_blank" rel="noopener">Find on Google Maps</a>'
     + ' · <a href="#" onclick="setLocation(' + i + ');return false">' + (p.precision === 'saved' ? 'Change location' : '<b>Set location from Google Maps</b>') + '</a>'
     + (p.precision === 'saved' ? ' · <a href="#" onclick="setLocation(' + i + ', true);return false">Remove</a>' : '')
@@ -539,9 +542,10 @@ function drawPoint(i){
 }
 
 function mapSummary(){
-  const n = {saved: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
+  const n = {saved: 0, street: 0, pincode: 0, locality: 0, approx: 0, missed: 0};
   lastPoints.forEach(g => { const p = g.point; n[!p ? 'missed' : p.precision in COLOR ? p.precision : 'approx']++; });
-  return (n.saved ? n.saved + ' exact (green), ' : '') + (n.pincode ? n.pincode + ' by pincode (teal), ' : '')
+  return (n.saved ? n.saved + ' exact (green), ' : '') + (n.street ? n.street + ' by address place (purple), ' : '')
+    + (n.pincode ? n.pincode + ' by pincode (teal), ' : '')
     + n.locality + ' at town/locality (blue), ' + n.approx + ' at EPFO office city (orange)'
     + (n.missed ? ', ' + n.missed + ' not found' : '') + '. Click "📍 Show on map" in a row to find it on the map.';
 }
@@ -568,7 +572,7 @@ async function readAll(run){
   for (let k = 0; k < todo.length; k++) {
     if (run !== plotRun) return;
     if (!needsDetails(todo[k])) continue;
-    $('mapStatus').textContent = 'Reading city, district and state from EPFO details: ' + (k + 1) + ' of ' + todo.length + '…';
+    $('mapStatus').textContent = 'Reading EPFO details and locating addresses (first time only): ' + (k + 1) + ' of ' + todo.length + '…';
     if (!await readDetails(todo[k])) return;
   }
   if (run === plotRun) $('mapStatus').textContent = mapSummary();
@@ -741,7 +745,9 @@ class Handler(BaseHTTPRequestHandler):
                         if info["pin"] and info["zone"] and info["region"]:
                             break
                     remember_address(est_id, {**info, "read": True})
-                # The row's map data again, now with its pincode pin and details
+                # Then look its address up online once (landmarks like KIIT)
+                refine_location(est_id, *row_fields(s, r)[2:4])
+                # The row's map data again, now with its better pin and details
                 return self._json(point_info(s, r))
             if self.path == "/location":
                 # Exact spot from Google Maps (pasted coordinates or a Maps
