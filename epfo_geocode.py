@@ -61,7 +61,8 @@ NOT_PLACES = {
     "GROUND", "FIRST", "SECOND", "THIRD", "FOURTH", "FIFTH", "UPPER", "LOWER",
     "PARK", "GARDEN", "GARDENS", "CIRCLE", "SQUARE", "ENCLAVE", "RESIDENCY", "PARADISE", "CENTRE", "CENTER",
 }
-OSM_VERSION = 3  # bump to look every establishment up online again after a rule change
+OSM_VERSION = 4  # bump to look every establishment up online again after a rule change
+DETAILS_VERSION = 2  # bump to read every establishment's EPFO details again (2: without the office address)
 
 # First two letters of an establishment ID name the EPFO zone, which is
 # mostly one state. Only used as the last fallback.
@@ -410,6 +411,11 @@ def address_from_details(sections):
     def take(label, value):
         label, value = label.lower(), (value or "").strip()
         if not value or value.lower() == label or LABEL_RE.fullmatch(value):
+            return
+        # The details also give the EPFO office's own address ("Bhavishya
+        # Nidhi Bhawan, ..."): never the establishment's address, pin or city.
+        office = "office" in label or "BHAVISHYA NIDHI" in value.upper()
+        if office and not any(w in label for w in ("zone", "region")):
             return
         if "address" in label and not any(w in label for w in ("mail", "web", "url")):
             value = split_glued(value)

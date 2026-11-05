@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import (OSM_VERSION, address_from_details, coords_from_text, geocode, known_address,
+from epfo_geocode import (DETAILS_VERSION, OSM_VERSION, address_from_details, coords_from_text, geocode, known_address,
                           refine_location, remember_address, save_location, split_glued)
 from epfo_lookup import BASE, EpfoClient, parse_tables
 
@@ -60,7 +60,7 @@ def details_info(known):
     before the online lookup existed get one more pass)."""
     known = known or {}
     return ({k: known.get(k) or "" for k in ("pin", "city", "district", "state", "zone", "region")}
-            | {"read": bool(known.get("read")) and known.get("osm_v") == OSM_VERSION})
+            | {"read": known.get("read") == DETAILS_VERSION and known.get("osm_v") == OSM_VERSION})
 
 
 def point_info(search, row):
@@ -731,7 +731,7 @@ class Handler(BaseHTTPRequestHandler):
                 sections = s["client"].details(r["est_id"], r["urls"])
                 # Keep pincode, address, state, zone, region for the map, for everyone
                 info = address_from_details(sections)
-                remember_address(row_fields(s, r)[0], {**info, "read": True})
+                remember_address(row_fields(s, r)[0], {**info, "read": DETAILS_VERSION})
                 return self._json({"sections": [{"title": t, "rows": rows} for t, rows in sections], "pin": info["pin"]})
             if self.path == "/pincode":
                 # Pincode, state, zone and region of one row without opening
@@ -740,7 +740,7 @@ class Handler(BaseHTTPRequestHandler):
                 r = s["results"][int(body["index"])]
                 est_id = row_fields(s, r)[0]
                 known = known_address(est_id)
-                if not (known and known.get("read")) and r.get("est_id") and r.get("urls"):
+                if (known or {}).get("read") != DETAILS_VERSION and r.get("est_id") and r.get("urls"):
                     c, panels, info = s["client"], [], {}
                     for url in r["urls"]:
                         if not url:
@@ -751,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
                         info = address_from_details(panels)
                         if info["pin"] and info["zone"] and info["region"]:
                             break
-                    remember_address(est_id, {**info, "read": True})
+                    remember_address(est_id, {**info, "read": DETAILS_VERSION})
                 # Then look its address up online once (landmarks like KIIT)
                 refine_location(est_id, *row_fields(s, r)[2:4])
                 # The row's map data again, now with its better pin and details
