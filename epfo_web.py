@@ -10,6 +10,7 @@ Settings (environment variables):
              Restrict the key to your site's address in Google Cloud.
 """
 
+import hashlib
 import json
 import os
 import secrets
@@ -28,7 +29,10 @@ HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
 GMAPS_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
 PORT = int(os.environ.get("EPFO_PORT", "8765"))
 # India's official boundary and states (Survey of India via DataMeet, CC BY 4.0)
-MAP_FILES = {f"/map/{n}": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", n)
+CODE_VERSION = hashlib.sha1(b"".join(
+    open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f), "rb").read().replace(b"\r\n", b"\n")
+    for f in ("epfo_web.py", "epfo_geocode.py", "epfo_lookup.py"))).hexdigest()[:10]
+MAP_FILES = {f"/map/{n}":os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", n)
              for n in ("india_states.geojson", "india_outline.geojson", "india_cover.geojson")}
 SESSION_TTL = 30 * 60  # seconds a visitor's search stays usable while idle
 MAX_SESSIONS = 1000
@@ -657,6 +661,9 @@ class Handler(BaseHTTPRequestHandler):
         # Links shared through chat apps often get "?..." appended
         if self.path.split("?", 1)[0] in ("/", "/index.html"):
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+        elif self.path == "/version":
+            # Fingerprint of the running code, to check a deploy went through
+            self._json({"code": CODE_VERSION})
         elif self.path in MAP_FILES:
             with open(MAP_FILES[self.path], "rb") as f:
                 self._send(200, f.read(), "application/geo+json", cache="public, max-age=86400")
