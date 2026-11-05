@@ -45,6 +45,7 @@ NOMINATIM = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "epfo-search-local/1.0 (personal EPFO establishment map)"
 MIN_INTERVAL = 1.1  # seconds between Nominatim requests
 MAX_KM_FROM_OFFICE = 150  # places farther than this from the EPFO office are wrong matches
+MAX_KM_COMMON_NAME = 25   # ... and for a name several places share, farther than this
 MIN_SUFFIX = 5  # shortest tail of a glued word tried as a place name
 
 # Words that are parts of addresses, not place names.
@@ -58,8 +59,9 @@ NOT_PLACES = {
     "PALACE", "TEMPLE", "MILLS", "WORKS", "FACTORY", "COMPANY", "SOCIETY", "BRANCH",
     "FLAT", "FLATS", "APARTMENT", "APARTMENTS", "TOWERS", "SHOP", "UNIT", "ROOM", "PREMISES",
     "GROUND", "FIRST", "SECOND", "THIRD", "FOURTH", "FIFTH", "UPPER", "LOWER",
+    "PARK", "GARDEN", "GARDENS", "CIRCLE", "SQUARE", "ENCLAVE", "RESIDENCY", "PARADISE", "CENTRE", "CENTER",
 }
-OSM_VERSION = 2  # bump to look every establishment up online again after a rule change
+OSM_VERSION = 3  # bump to look every establishment up online again after a rule change
 
 # First two letters of an establishment ID name the EPFO zone, which is
 # mostly one state. Only used as the last fallback.
@@ -166,9 +168,40 @@ def _nominatim(query):
 
 # ---- matching -----------------------------------------------------------
 
+# EPFO's Address column glues address line 1, line 2 and the city together:
+# 'PARK PARADISE COLONYRAGHUNATHPUR', 'CAUVERY ROADVEERAPPANCHATRAM'.
+# A line usually ends in one of these words, so a word that runs on past one
+# of them is split there.
+LINE_ENDS = ("ROAD", "MARG", "COLONY", "STREET", "CENTRE", "CENTER", "COMPLEX", "APARTMENTS", "APARTMENT",
+             "ESTATE", "AREA", "CHOWK", "BAZAR", "BAZAAR", "MARKET", "LANE", "HOUSE", "TOWERS", "TOWER",
+             "PLAZA", "BUILDING", "LAYOUT", "SECTOR", "PHASE", "VIHAR", "ENCLAVE", "CAMPUS", "FLOOR", "NAGAR")
+_GLUED = re.compile(r"[A-Za-z]{7,}")
+
+
+def split_glued(text):
+    """'COLONYRAGHUNATHPUR' -> 'COLONY, RAGHUNATHPUR', 'LATOUCHEROADKANPUR' ->
+    'LATOUCHE ROAD, KANPUR'. Split only where the rest starts with a known
+    place name, so 'NAGARJUNASAGAR' stays whole; a part before the line
+    word must be 4+ letters (so 'KHAREAPUR' keeps its 'AREA')."""
+    def fix(w):
+        up = w.upper()
+        for end in LINE_ENDS:
+            i = up.find(end)
+            j = i + len(end)
+            if i < 0 or len(w) - j < 3 or 0 < i < 4:
+                continue
+            rest = fix(w[j:])
+            if not _places(_key(rest.split(",")[0])):
+                continue
+            return (w[:i] + " " if i else "") + w[i:j] + ", " + rest
+        return w
+    return _GLUED.sub(lambda m: fix(m.group(0)), text or "")
+
+
 def _clean(text):
-    """Drop bracketed notes and undo repeated words: 'PATNAPATNA' -> 'PATNA'."""
-    text = re.sub(r"\([^)]*\)", " ", text or "")
+    """Drop bracketed notes, undo repeated words ('PATNAPATNA' -> 'PATNA')
+    and split glued address lines."""
+    text = split_glued(re.sub(r"\([^)]*\)", " ", text or ""))
     text = re.sub(r"\b([A-Za-z]{3,})\1\b", r"\1", text)
     return " ".join(text.split())
 
@@ -224,13 +257,28 @@ def _place_text(address, known, office):
 
 
 def _locality(address, near, skip=()):
-    """First address candidate that is a real place close to the office."""
-    for k in _candidates(address, skip):
-        hits = [h for h in _places(k) if near is None or _km(h, near) <= MAX_KM_FROM_OFFICE]
-        if hits:
-            # Several places share a name: prefer the bigger, then the nearer one.
-            lat, lng, _ = max(hits, key=lambda h: (h[2], -_km(h, near) if near else 0))
-            return lat, lng
+    """First address candidate that is a real place close to the office,
+    reading the address parts from the last (the town) back. A part naming
+    the office city itself ends the search: only a name in that same part
+    ('BALIANTA BHUBANESWAR') is more exact; earlier parts ('MEWAR IND.AREA'
+    before 'MADARIUDAIPUR') would only find look-alikes elsewhere."""
+    for part in reversed([p for p in re.split(r"[,;]", address) if p.strip()]):
+        for k in _candidates(part, skip):
+            hits = [h for h in _places(k) if near is None or _km(h, near) <= MAX_KM_FROM_OFFICE]
+            towns = [h for h in hits if h[2] >= 0] or hits   # districts (population -1) only if no town
+            if len(towns) > 1 and near:
+                # A common name (many Raghunathpurs): trust only one close to
+                # the office, the nearest; a wrong village far off is worse
+                # than the office city.
+                lat, lng, _ = min(towns, key=lambda h: _km(h, near))
+                if _km((lat, lng), near) <= MAX_KM_COMMON_NAME:
+                    return lat, lng
+                continue
+            if towns:
+                lat, lng, _ = towns[0]
+                return lat, lng
+        if any(len(s) >= 4 and s in _key(part) for s in skip):
+            return None
     return None
 
 
@@ -357,13 +405,17 @@ def address_from_details(sections):
     Only cells labelled pin/address/postal are read for the pincode, so other
     six-digit numbers (codes, counts) are not mistaken for one."""
     info = {"pin": None, "address": "", "state": "", "zone": "", "region": "", "district": "", "city": ""}
+    lines = []   # every address field in order: Address 1, Address 2, ...
 
     def take(label, value):
         label, value = label.lower(), (value or "").strip()
         if not value or value.lower() == label or LABEL_RE.fullmatch(value):
             return
-        if "address" in label and len(value) > len(info["address"]):
-            info["address"] = value
+        if "address" in label and not any(w in label for w in ("mail", "web", "url")):
+            value = split_glued(value)
+            # skip a line already contained in one kept (same field seen twice)
+            if not any(value.upper() in l.upper() for l in lines):
+                lines[:] = [l for l in lines if l.upper() not in value.upper()] + [value]
         if any(w in label for w in ("pin", "postal", "address")) and not info["pin"]:
             m = PIN_RE.search(value)
             if m and pincode_point(m.group(1) + m.group(2)):
@@ -382,6 +434,7 @@ def address_from_details(sections):
             if nxt and len(nxt) == len(row):           # header row over a value row
                 for h, v in zip(row, nxt):
                     take(h, v)
+    info["address"] = ", ".join(lines)
     return info
 
 
@@ -444,6 +497,10 @@ def street_point(address, office, known=None):
     anchor, limit = (town, MAX_KM_IN_TOWN) if town else (near, MAX_KM_STREET)
     text = ", ".join([address] + ([known["city"]] if known.get("city") else []))
     for q in _street_queries(_clean(text), skip):
+        # 'CAUVERY ROAD' exists in many towns: street names only inside a town
+        # already found; without one, only distinctive names ('KIIT').
+        if not town and any(w in LINE_ENDS for w in q.split()):
+            continue
         point = _nominatim(f"{q}, {office}, India")
         if point and _km(point, anchor) <= limit:
             return {"lat": point[0], "lng": point[1], "q": q}

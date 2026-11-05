@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 
 from epfo_geocode import (OSM_VERSION, address_from_details, coords_from_text, geocode, known_address,
-                          refine_location, remember_address, save_location)
+                          refine_location, remember_address, save_location, split_glued)
 from epfo_lookup import BASE, EpfoClient, parse_tables
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
@@ -71,6 +71,7 @@ def point_info(search, row):
     full = known.get("address") or ", ".join(x for x in (address, office) if x)
     return {"point": geocode(address, office, est_id), "est_id": est_id, "name": name,
             "address": address, "office": office, **details_info(known),
+            "full_address": known.get("address") or "",   # all address lines from View details
             "query": ", ".join(x for x in (name, full) if x)}
 
 
@@ -524,11 +525,11 @@ function drawPoint(i){
   // Google Maps searches the establishment itself: its name and EPFO address,
   // then city, district, state and pincode to keep it in the right place
   const gmaps = 'https://www.google.com/maps/search/?api=1&query='
-    + encodeURIComponent(uniq([g.name, g.address, g.city, g.district, g.state, g.pin]).join(', '));
+    + encodeURIComponent(uniq([g.name, g.full_address || g.address, g.city, g.district, g.state, g.pin]).join(', '));
   const facts = [['City', g.city], ['District', g.district], ['State', g.state], ['Zone', g.zone], ['Region', g.region]]
     .filter(f => f[1]).map(f => f[0] + ': <b>' + esc(f[1]) + '</b>').join('<br>');
   const html = '<div class="pop"><b>' + esc(g.name) + '</b>' + (g.office ? ' (' + esc(g.office) + ')' : '')
-    + '<br>' + esc(g.address) + '<br>' + esc(g.est_id)
+    + '<br>' + esc(g.full_address || g.address) + '<br>' + esc(g.est_id)
     + (facts ? '<br>' + facts : (!g.read && x && x.has_details ? '<br><i>Reading city, state, zone, region…</i>' : ''))
     + '<br><i>' + esc(p.precision === 'pincode' ? 'Pincode ' + p.pin + ' area, from EPFO details'
                       : p.precision === 'street' ? '"' + p.q + '" from the address, found on OpenStreetMap' : PRECISION[p.precision]) + '</i>'
@@ -704,6 +705,11 @@ class Handler(BaseHTTPRequestHandler):
                     header = header[:-1]
                     for r in results:
                         r["cells"] = r["cells"][:len(header)]
+                # EPFO glues address lines and city: 'COLONYRAGHUNATHPUR'
+                a = next((k for k, h in enumerate(header) if h.lower() == "address"), None)
+                for r in results:
+                    if a is not None and a < len(r["cells"]):
+                        r["cells"][a] = split_glued(r["cells"][a])
                 # Each search gets an ID that the page sends back with every
                 # row click, so a row always refers to its own search even
                 # when another tab searched since. Details must use the EPFO
