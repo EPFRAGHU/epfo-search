@@ -129,9 +129,6 @@ PAGE = r"""<!doctype html>
   #map:not(.plain) .st-label { color:#3b4452; text-shadow:0 0 3px #fff, 0 0 3px #fff; }
   .st-label::before { display:none; }
   #map.far .st-label { display:none; }
-  .est-label { font-size:11px; line-height:1.25; padding:2px 5px; text-align:center; font-weight:600; color:#1c2430;
-               background:rgba(255,255,255,.88); border:1px solid #b9c2cc; box-shadow:none;
-               width:max-content; max-width:240px; white-space:normal; }
   #mapStatus { color:var(--muted); font-size:13px; margin:0 0 8px; }
   .leaflet-popup-content, .pop { font-size:13px; line-height:1.45; color:#1c2430; }
   tr.sel td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -404,8 +401,8 @@ async function googleView(){
       const e = byIndex[i]; if (!e) return;
       e[0].setMap(null); markers = markers.filter(m => m !== e[0]); delete byIndex[i];
     },
-    add(lat, lng, color, html, i, tip){
-      const m = new g.Marker({position: {lat, lng}, map, title: tip.join('\n'), icon: {path: g.SymbolPath.CIRCLE, scale: 8,
+    add(lat, lng, color, html, i){
+      const m = new g.Marker({position: {lat, lng}, map, icon: {path: g.SymbolPath.CIRCLE, scale: 8,
         fillColor: color, fillOpacity: .85, strokeColor: '#fff', strokeWeight: 2}});
       m.addListener('click', () => { info.setContent(html); info.open({map, anchor: m}); onPinOpen(i); });
       markers.push(m); byIndex[i] = [m, html];
@@ -478,21 +475,16 @@ async function indiaView(){
     map,
     clear(){ pins.clearLayers(); byIndex = {}; map.invalidateSize(); },
     remove(i){ if (byIndex[i]) { pins.removeLayer(byIndex[i]); delete byIndex[i]; } },
-    add(lat, lng, color, html, i, tip){
-      // Always-on label under the dot, one line each (text nodes: no escaping needed)
-      const label = document.createElement('div');
-      tip.forEach((line, k) => { if (k) label.append(document.createElement('br')); label.append(line); });
+    add(lat, lng, color, html, i){
       byIndex[i] = L.circleMarker([lat, lng], {radius: 8, weight: 2, color, fillOpacity: .55})
-        .bindPopup(html).bindTooltip(label, {permanent: true, direction: 'bottom', offset: [0, 6], className: 'est-label'})
-        .on('popupopen', () => onPinOpen(i)).addTo(pins);
+        .bindPopup(html).on('popupopen', () => onPinOpen(i)).addTo(pins);
     },
     focus(i, zoom = 7){
       const m = byIndex[i]; if (!m) return;
       map.setView(m.getLatLng(), Math.max(map.getZoom(), zoom), {animate: false});
       m.openPopup();
     },
-    // extra room at the bottom for the labels under the dots
-    fit(){ if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, paddingTopLeft: [40, 30], paddingBottomRight: [40, 90]}); },
+    fit(){ if (pins.getLayers().length) map.fitBounds(pins.getBounds(), {maxZoom: 13, padding: [30, 30]}); },
   };
 }
 
@@ -525,7 +517,10 @@ function drawPoint(i){
   view.remove(i);
   const g = lastPoints[i], p = g && g.point, x = lastResults[i];
   if (!p) return;
-  const gmaps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(g.query);
+  // Google Maps searches the establishment itself: its name and EPFO address,
+  // then city, district, state and pincode to keep it in the right place
+  const gmaps = 'https://www.google.com/maps/search/?api=1&query='
+    + encodeURIComponent(uniq([g.name, g.address, g.city, g.district, g.state, g.pin]).join(', '));
   const facts = [['City', g.city], ['District', g.district], ['State', g.state], ['Zone', g.zone], ['Region', g.region]]
     .filter(f => f[1]).map(f => f[0] + ': <b>' + esc(f[1]) + '</b>').join('<br>');
   const html = '<div class="pop"><b>' + esc(g.name) + '</b>' + (g.office ? ' (' + esc(g.office) + ')' : '')
@@ -537,8 +532,7 @@ function drawPoint(i){
     + ' · <a href="#" onclick="setLocation(' + i + ');return false">' + (p.precision === 'saved' ? 'Change location' : '<b>Set location from Google Maps</b>') + '</a>'
     + (p.precision === 'saved' ? ' · <a href="#" onclick="setLocation(' + i + ', true);return false">Remove</a>' : '')
     + (x && x.has_details ? '<br><a href="#" onclick="details(' + i + ');return false">View details</a>' : '') + '</div>';
-  view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c', html, i,
-           [g.name, g.est_id, uniq([g.city, g.district, g.state]).join(', '), g.office ? 'EPFO: ' + g.office : ''].filter(Boolean));
+  view.add(p.lat, p.lng, COLOR[p.precision] || '#c2410c', html, i);
 }
 
 function mapSummary(){
