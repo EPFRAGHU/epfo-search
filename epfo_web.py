@@ -20,8 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
-from epfo_geocode import (address_from_details, coords_from_text, geocode, known_address, refine_location,
-                          remember_address, save_location)
+from epfo_geocode import (OSM_VERSION, address_from_details, coords_from_text, geocode, known_address,
+                          refine_location, remember_address, save_location)
 from epfo_lookup import BASE, EpfoClient, parse_tables
 
 HOST = os.environ.get("EPFO_HOST", "127.0.0.1")
@@ -56,7 +56,7 @@ def details_info(known):
     before the online lookup existed get one more pass)."""
     known = known or {}
     return ({k: known.get(k) or "" for k in ("pin", "city", "district", "state", "zone", "region")}
-            | {"read": bool(known.get("read")) and "osm" in known})
+            | {"read": bool(known.get("read")) and known.get("osm_v") == OSM_VERSION})
 
 
 def point_info(search, row):

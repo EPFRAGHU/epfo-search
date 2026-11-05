@@ -56,7 +56,10 @@ NOT_PLACES = {
     "COMPLEX", "TOWER", "CAMPUS", "COLLEGE", "SCHOOL", "HOSPITAL", "LIMITED", "PRIVATE",
     "STATION", "JUNCTION", "CHOWK", "GALI", "LANE", "BLOCK", "WARD", "NAGARAM", "PURAM",
     "PALACE", "TEMPLE", "MILLS", "WORKS", "FACTORY", "COMPANY", "SOCIETY", "BRANCH",
+    "FLAT", "FLATS", "APARTMENT", "APARTMENTS", "TOWERS", "SHOP", "UNIT", "ROOM", "PREMISES",
+    "GROUND", "FIRST", "SECOND", "THIRD", "FOURTH", "FIFTH", "UPPER", "LOWER",
 }
+OSM_VERSION = 2  # bump to look every establishment up online again after a rule change
 
 # First two letters of an establishment ID name the EPFO zone, which is
 # mostly one state. Only used as the last fallback.
@@ -188,10 +191,11 @@ def _office_point(office):
     return tuple(point) if point else None
 
 
-def _candidates(address):
+def _candidates(address, skip=()):
     """Keys that may name a place, most likely first: whole address parts
     from the last one back (the town is usually last), then single words,
-    then the tails of glued words ('ROADERNAKULAM' -> 'ERNAKULAM')."""
+    then the tails of glued words ('ROADERNAKULAM' -> 'ERNAKULAM').
+    Keys in skip (the EPFO office city) are left out: no more exact than it."""
     parts = [p for p in re.split(r"[,;]", address) if p.strip()]
     out = []
     for part in reversed(parts):
@@ -203,13 +207,25 @@ def _candidates(address):
                 continue
             out.append(w)
             out += [w[i:] for i in range(1, len(w) - MIN_SUFFIX + 1) if w[i:] not in NOT_PLACES]
-    seen = set()
+    seen = set(skip)
     return [k for k in out if not (k in seen or seen.add(k))]
 
 
-def _locality(address, near):
+def _office_keys(office):
+    """'KOCHI (COCHIN)' / 'THANE (MUMBAI-II)' -> keys naming the office city."""
+    return {_key(p) for p in [office] + re.split(r"[-/,\s()]+", office or "") if len(_key(p)) >= 3}
+
+
+def _place_text(address, known, office):
+    """Address plus the City the EPFO details gave, city first so that,
+    read from the end, the address parts come first. Not the district: its
+    name is its headquarters town, often far (Khordha for Bhubaneswar)."""
+    return ", ".join(([known["city"]] if known.get("city") else []) + [address])
+
+
+def _locality(address, near, skip=()):
     """First address candidate that is a real place close to the office."""
-    for k in _candidates(address):
+    for k in _candidates(address, skip):
         hits = [h for h in _places(k) if near is None or _km(h, near) <= MAX_KM_FROM_OFFICE]
         if hits:
             # Several places share a name: prefer the bigger, then the nearer one.
@@ -393,14 +409,15 @@ MAX_KM_IN_TOWN = 15  # ... or farther than this from a town already found in the
 STREET_QUERIES = 4   # online lookups per establishment, at most (one per second)
 
 
-def _street_queries(address):
+def _street_queries(address, skip=()):
     """Address parts worth asking OpenStreetMap about: whole parts first
     (street names: 'LATOUCHE ROAD'), then their distinctive single words
-    ('384/2165KIIT CAMPUS, PATIA' -> ['KIIT CAMPUS', 'KIIT', 'PATIA'])."""
+    ('384/2165KIIT CAMPUS, PATIA' -> ['KIIT CAMPUS', 'KIIT', 'PATIA']).
+    Words in skip (the office city) are not asked about on their own."""
     phrases, words = [], []
     for part in re.split(r"[,;]", address):
         all_words = [w for w in re.split(r"[^A-Za-z]+", part.upper()) if len(w) >= 3]
-        named = [w for w in all_words if w not in NOT_PLACES]
+        named = [w for w in all_words if w not in NOT_PLACES and w not in skip]
         if len(all_words) > 1 and named:
             phrases.append(" ".join(all_words))
         words += named
@@ -408,20 +425,25 @@ def _street_queries(address):
     return [q for q in phrases + words if not (q in seen or seen.add(q))][:STREET_QUERIES]
 
 
-def street_point(address, office):
-    """Where OpenStreetMap puts a place or landmark named in the address
-    (e.g. 'KIIT' -> the KIIT campus), searched near the EPFO office city.
+def street_point(address, office, known=None):
+    """Where OpenStreetMap puts a place or landmark named in the address or
+    in the City / District of its EPFO details (e.g. 'KIIT' -> the KIIT
+    campus, 'BALIANTA'), searched near the EPFO office city.
     Slow (online, one query per second, cached); call in the background."""
+    known = known or {}
     office, address = _clean(office), _clean(address)
     near = _office_point(office) if office else None
     if not near:
         return None
-    # A town already found in the address locally (e.g. Ropar) is trusted
-    # more than an online name match elsewhere: the online point must lie in
-    # that town. Without one, it must lie near the EPFO office.
-    town = _locality(address, near)
+    skip = _office_keys(office)
+    # A town already found locally in the address or the details' city
+    # (e.g. Ropar, Balianta) is trusted more than an online name match
+    # elsewhere: the online point must lie in that town. Without one, it
+    # must lie near the EPFO office.
+    town = _locality(_place_text(address, known, office), near, skip)
     anchor, limit = (town, MAX_KM_IN_TOWN) if town else (near, MAX_KM_STREET)
-    for q in _street_queries(address):
+    text = ", ".join([address] + ([known["city"]] if known.get("city") else []))
+    for q in _street_queries(_clean(text), skip):
         point = _nominatim(f"{q}, {office}, India")
         if point and _km(point, anchor) <= limit:
             return {"lat": point[0], "lng": point[1], "q": q}
@@ -429,11 +451,12 @@ def street_point(address, office):
 
 
 def refine_location(est_id, address, office):
-    """Look the establishment up online once and keep the answer (or that
-    there was none) with its other details, for everyone."""
+    """Look the establishment up online once (again after OSM_VERSION
+    changes) and keep the answer, or that there was none, for everyone."""
     known = _addresses.get(est_id) or {}
-    if est_id and "osm" not in known:
-        _addresses.put(est_id, {**known, "osm": street_point(known.get("address") or address, office)})
+    if est_id and known.get("osm_v") != OSM_VERSION:
+        osm = street_point(known.get("address") or address, office, known)
+        _addresses.put(est_id, {**known, "osm": osm, "osm_v": OSM_VERSION})
 
 
 def geocode(address, office, est_id=""):
@@ -452,7 +475,9 @@ def geocode(address, office, est_id=""):
     # near the EPFO office.
     if p and p[5] and (not near or _km(p, near) <= MAX_KM_PINCODE):
         return {"lat": p[0], "lng": p[1], "precision": "pincode", "pin": known["pin"]}
-    point = _locality(address, near) if address else None
+    # The details' City / District name places too (e.g. "BALIANTA BHUBANESWAR")
+    # (the city as read from the details, not a name filled in from the pincode)
+    point = _locality(_place_text(address, known, office), near, _office_keys(office))
     if point:
         return {"lat": point[0], "lng": point[1], "precision": "locality"}
     if near:
